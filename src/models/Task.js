@@ -13,6 +13,12 @@ const taskSchema = new mongoose.Schema(
       required: [true, 'Task description is required'],
       maxlength: [5000, 'Description cannot exceed 5000 characters'],
     },
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Organization',
+      required: true,
+      index: true,
+    },
     priority: {
       type: String,
       enum: ['high', 'medium', 'low'],
@@ -73,5 +79,7 @@ const taskSchema = new mongoose.Schema(
 
 // Auto-mark overdue tasks
 taskSchema.index({ deadline: 1, status: 1 });
+
+taskSchema.index({ organizationId: 1 });
 
 module.exports = mongoose.model('Task', taskSchema);
