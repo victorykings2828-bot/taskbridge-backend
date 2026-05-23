@@ -33,7 +33,7 @@ const PLANS = [
     cta: 'Get started free', extraStorage: null,
   },
   {
-    id: 'pro', name: 'Pro', price: 15, priceLabel: '$15 / month',
+    id: 'pro', name: 'Pro', price: 1249, priceLabel: '₹1,249/mo',
     description: 'Everything a growing team needs, at a price that makes sense',
     badge: 'Most Popular', highlighted: true,
     limits: { managers: 5, employeesPerManager: 100, totalEmployees: 500, storageLimitBytes: 10*1024*1024*1024 },
@@ -44,7 +44,7 @@ const PLANS = [
       { text: 'Everything in Starter', included: true },
       { text: 'Task priority (High / Medium / Low)', included: true },
       { text: 'File attachments & deliverables (10 GB)', included: true },
-      { text: 'Extra storage (+5 GB for $1.50/mo)', included: true },
+      { text: 'Extra storage (+5 GB for ₹125/mo)', included: true },
       { text: 'Team workload overview', included: true },
       { text: 'Feedback & 5-star ratings', included: true },
       { text: 'Manager & employee performance dashboards', included: true },
@@ -54,10 +54,10 @@ const PLANS = [
       { text: 'Audit logs & compliance', included: false },
       { text: 'Dedicated account manager', included: false },
     ],
-    cta: 'Start 14-day free trial', extraStorage: { perGB: 5, priceDollars: 1.50 },
+    cta: 'Start 14-day free trial', extraStorage: { perGB: 5, priceINR: 125 },
   },
   {
-    id: 'enterprise', name: 'Enterprise', price: 78, priceLabel: '$78 / month',
+    id: 'enterprise', name: 'Enterprise', price: 6499, priceLabel: '₹6,499/mo',
     description: 'Unlimited scale, complete visibility, full accountability',
     badge: null, highlighted: false,
     limits: { managers: 9999, employeesPerManager: 9999, totalEmployees: 9999, storageLimitBytes: 80*1024*1024*1024 },
@@ -67,7 +67,7 @@ const PLANS = [
       { text: 'Unlimited employees', included: true },
       { text: 'Everything in Pro', included: true },
       { text: '80 GB file storage', included: true },
-      { text: 'Extra storage (+5 GB for $1.50/mo)', included: true },
+      { text: 'Extra storage (+5 GB for ₹125/mo)', included: true },
       { text: 'Full audit log with export', included: true },
       { text: 'Cross-team workload balancing', included: true },
       { text: 'Task completion rate & trend reports', included: true },
@@ -78,7 +78,7 @@ const PLANS = [
       { text: 'Priority email & chat support', included: true },
       { text: 'Onboarding assistance', included: true },
     ],
-    cta: 'Get started', extraStorage: { perGB: 5, priceDollars: 1.50 },
+    cta: 'Get started', extraStorage: { perGB: 5, priceINR: 125 },
   },
 ];
 

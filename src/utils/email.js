@@ -27,7 +27,7 @@ const sendEmail = async ({ to, subject, html, text }) => {
   try {
     const transporter = createTransporter();
     const info = await transporter.sendMail({
-      from: process.env.EMAIL_FROM || 'Employee Work Dist <noreply@example.com>',
+      from: process.env.EMAIL_FROM || 'TaskBridge <noreply@taskbridge.io>',
       to,
       subject,
       html,

@@ -1,5 +1,5 @@
 {
-  "name": "employee-work-dist-backend",
+  "name": "taskbridge-backend",
   "version": "1.0.0",
   "description": "Employee Work Distribution System - Backend",
   "main": "src/index.js",
