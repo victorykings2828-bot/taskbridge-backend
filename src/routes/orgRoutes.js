@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticate, authorize, requirePasswordChanged } = require('../middleware/auth');
 const {
-  registerOrganization, joinOrganization,
+  registerOrganization, joinOrganization, joinWithCode,
   createInvite, acceptInvite, listInvites, revokeInvite,
   getMyOrganization, upgradePlan,
   purchaseExtraStorage, cleanStorage, rotateJoinCode,
@@ -13,6 +13,7 @@ const {
 router.post('/register',       registerOrganization);
 router.get('/plans',           getPlans);
 router.post('/invite/accept',  acceptInvite);  // accept invite (creates account)
+router.post('/join-with-code', joinWithCode);  // employee self-registration with company code
 
 // Authenticated
 router.post('/join',           authenticate, joinOrganization);

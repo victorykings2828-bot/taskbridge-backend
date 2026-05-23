@@ -329,4 +329,69 @@ const rotateJoinCode = async (req, res) => {
 // GET /api/org/plans  (public)
 const getPlans = (req, res) => res.json({ success: true, plans: PLANS });
 
-module.exports = { registerOrganization, joinOrganization, createInvite, acceptInvite, listInvites, revokeInvite, getMyOrganization, upgradePlan, purchaseExtraStorage, cleanStorage, rotateJoinCode, getPlans };
+// POST /api/org/join-with-code  (public — employee self-registration with join code)
+const joinWithCode = async (req, res) => {
+  try {
+    const { joinCode, name, email, password } = req.body;
+    if (!joinCode || !name || !email || !password)
+      return res.status(400).json({ success: false, message: 'All fields are required' });
+
+    const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$/;
+    if (!EMAIL_REGEX.test(email))
+      return res.status(400).json({ success: false, message: 'Enter a valid email address' });
+    if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password))
+      return res.status(400).json({ success: false, message: 'Password must be 8+ chars with uppercase, lowercase, and a number' });
+
+    if (await User.findOne({ email: email.toLowerCase().trim() }))
+      return res.status(409).json({ success: false, message: 'An account with this email already exists. Try logging in instead.' });
+
+    const org = await Organization.findOne({ joinCode: joinCode.toUpperCase().trim(), isActive: true });
+    if (!org) return res.status(404).json({ success: false, message: 'Invalid join code. Check with your administrator.' });
+    if (org.joinCodeExpiresAt && org.joinCodeExpiresAt < new Date())
+      return res.status(410).json({ success: false, message: 'This join code has expired. Ask your admin to regenerate it.' });
+
+    // Check employee limit
+    const empCount = await User.countDocuments({ organizationId: org._id, role: 'employee', isActive: true });
+    if (empCount >= org.limits.totalEmployees) {
+      return res.status(403).json({ success: false, message: 'This company has reached its employee limit. Contact your administrator.' });
+    }
+
+    const employee = new User({
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      password,
+      role: 'employee',
+      organizationId: org._id,
+      subscriptionTier: org.subscriptionTier,
+      isFirstLogin: false,
+    });
+    await employee.save();
+
+    // Rotate join code
+    org.rotateJoinCode();
+    await org.save();
+
+    // Generate tokens
+    const accessToken = generateAccessToken(employee._id, employee.role);
+    const refreshToken = generateRefreshToken(employee._id);
+    employee.refreshTokens.push({ token: hashToken(refreshToken) });
+    await employee.save();
+    setRefreshTokenCookie(res, refreshToken);
+
+    await AuditLog.create({ performedBy: employee._id, action: 'USER_JOINED_VIA_CODE', targetModel: 'Organization', targetId: org._id });
+
+    res.status(201).json({
+      success: true,
+      message: `Welcome to ${org.name}!`,
+      accessToken,
+      user: { id: employee._id, name: employee.name, email: employee.email, role: 'employee', organizationId: org._id, subscriptionTier: org.subscriptionTier, isFirstLogin: false },
+      organization: { id: org._id, name: org.name },
+      requirePasswordChange: false,
+    });
+  } catch (err) {
+    console.error('joinWithCode:', err);
+    res.status(500).json({ success: false, message: 'Failed to join. Please try again.' });
+  }
+};
+
+module.exports = { registerOrganization, joinOrganization, joinWithCode, createInvite, acceptInvite, listInvites, revokeInvite, getMyOrganization, upgradePlan, purchaseExtraStorage, cleanStorage, rotateJoinCode, getPlans };

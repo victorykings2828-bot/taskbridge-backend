@@ -83,6 +83,30 @@ const createUser = async (req, res) => {
       return res.status(409).json({ success: false, message: 'An account with this email already exists' });
     }
 
+    // Determine managerId
+    let assignedManagerId = null;
+    if (role === 'employee') {
+      if (creator.role === 'manager') {
+        assignedManagerId = creator._id;
+      } else if (creator.role === 'super_admin') {
+        // Super admin must specify which manager the employee reports to
+        const { managerId: reqManagerId } = req.body;
+        if (reqManagerId) {
+          const manager = await User.findOne({ _id: reqManagerId, organizationId: org._id, role: 'manager', isActive: true });
+          if (!manager) {
+            return res.status(400).json({ success: false, message: 'Selected manager not found or inactive' });
+          }
+          // Check per-manager employee limit
+          const underManager = await User.countDocuments({ managerId: reqManagerId, organizationId: org._id, role: 'employee', isActive: true });
+          if (underManager >= org.limits.employeesPerManager) {
+            return res.status(403).json({ success: false, message: `This manager has reached the limit of ${org.limits.employeesPerManager} employees.`, upgradeRequired: true });
+          }
+          assignedManagerId = reqManagerId;
+        }
+        // If no managerId provided, employee is unassigned (super_admin can assign later)
+      }
+    }
+
     const tempPassword = generateTempPassword();
 
     const newUser = await User.create({
@@ -93,7 +117,7 @@ const createUser = async (req, res) => {
       department: department || '',
       phone: phone || '',
       createdBy: creator._id,
-      managerId: creator.role === 'manager' ? creator._id : null,
+      managerId: assignedManagerId,
       organizationId: creator.organizationId,
       subscriptionTier: org.subscriptionTier || 'free',
       isFirstLogin: true,
@@ -130,14 +154,19 @@ const createUser = async (req, res) => {
   }
 };
 
-// GET /api/users — scoped to org
+// GET /api/users — scoped to org (super_admin can use ?role=manager or ?role=employee)
 const getUsers = async (req, res) => {
   try {
     const requester = req.user;
     let query = { organizationId: requester.organizationId };
 
     if (requester.role === 'super_admin') {
-      query.role = 'manager';
+      const roleFilter = req.query.role;
+      if (roleFilter && ['manager', 'employee'].includes(roleFilter)) {
+        query.role = roleFilter;
+      } else {
+        query.role = { $in: ['manager', 'employee'] };
+      }
     } else if (requester.role === 'manager') {
       query.role = 'employee';
       query.managerId = requester._id;
