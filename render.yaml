@@ -12,3 +12,6 @@ services:
         value: production
       - key: PORT
         value: 10000
+      # Set these in the Render dashboard → Environment (not stored here for security):
+      # MONGODB_URI, JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, COOKIE_SECRET
+      # FRONTEND_URL=https://taskbridge-frontend-sandy.vercel.app
