@@ -8,7 +8,12 @@ const createTask = async (req, res) => {
   try {
     const { title, description, priority, deadline, assignedTo } = req.body;
 
-    const employee = await User.findOne({ _id: assignedTo, managerId: req.user._id, role: 'employee' });
+    const employee = await User.findOne({
+      _id: assignedTo,
+      managerId: req.user._id,
+      role: 'employee',
+      organizationId: req.user.organizationId,
+    });
     if (!employee) {
       return res.status(400).json({ success: false, message: 'Employee not found or not under your management' });
     }
@@ -20,6 +25,7 @@ const createTask = async (req, res) => {
       deadline: new Date(deadline),
       assignedTo,
       assignedBy: req.user._id,
+      organizationId: req.user.organizationId,
     });
 
     await Notification.create({
@@ -56,7 +62,9 @@ const getTasks = async (req, res) => {
     const requester = req.user;
     const { status, priority, page = 1, limit = 20 } = req.query;
 
-    let query = {};
+    // Always filter by organization first
+    let query = { organizationId: requester.organizationId };
+
     if (requester.role === 'manager') query.assignedBy = requester._id;
     else if (requester.role === 'employee') query.assignedTo = requester._id;
 
@@ -87,7 +95,10 @@ const getTasks = async (req, res) => {
 // ─── GET SINGLE TASK ────────────────────────────────────────────────────────
 const getTaskById = async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id)
+    const task = await Task.findOne({
+      _id: req.params.id,
+      organizationId: req.user.organizationId,
+    })
       .populate('assignedTo', 'name email')
       .populate('assignedBy', 'name email');
 
@@ -111,7 +122,10 @@ const getTaskById = async (req, res) => {
 const updateTaskStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    const task = await Task.findById(req.params.id);
+    const task = await Task.findOne({
+      _id: req.params.id,
+      organizationId: req.user.organizationId,
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     const validTransitions = {
@@ -161,7 +175,11 @@ const updateTaskStatus = async (req, res) => {
 const acceptOrFlagTask = async (req, res) => {
   try {
     const { action, flagReason } = req.body;
-    const task = await Task.findOne({ _id: req.params.id, assignedTo: req.user._id });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedTo: req.user._id,
+      organizationId: req.user.organizationId,
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     if (action === 'accept') {
@@ -191,7 +209,12 @@ const acceptOrFlagTask = async (req, res) => {
 const reviewTask = async (req, res) => {
   try {
     const { action, revisionNote } = req.body;
-    const task = await Task.findOne({ _id: req.params.id, assignedBy: req.user._id, status: 'under_review' });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedBy: req.user._id,
+      organizationId: req.user.organizationId,
+      status: 'under_review',
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found or not under review' });
 
     if (action === 'approve') {
@@ -228,7 +251,11 @@ const requestExtension = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Reason and new date are required' });
     }
 
-    const task = await Task.findOne({ _id: req.params.id, assignedTo: req.user._id });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedTo: req.user._id,
+      organizationId: req.user.organizationId,
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     if (task.extensionRequested && task.extensionStatus === 'pending') {
@@ -259,7 +286,12 @@ const requestExtension = async (req, res) => {
 const reviewExtension = async (req, res) => {
   try {
     const { action } = req.body;
-    const task = await Task.findOne({ _id: req.params.id, assignedBy: req.user._id, extensionStatus: 'pending' });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedBy: req.user._id,
+      organizationId: req.user.organizationId,
+      extensionStatus: 'pending',
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found or no pending extension' });
 
     if (action === 'approve') {
@@ -292,7 +324,11 @@ const reviewExtension = async (req, res) => {
 const editTask = async (req, res) => {
   try {
     const { title, description, priority, deadline } = req.body;
-    const task = await Task.findOne({ _id: req.params.id, assignedBy: req.user._id });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedBy: req.user._id,
+      organizationId: req.user.organizationId,
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     if (task.status !== 'not_started') {
@@ -322,7 +358,11 @@ const editTask = async (req, res) => {
 // ─── CANCEL TASK (manager, before accepted) ──────────────────────────────────
 const cancelTask = async (req, res) => {
   try {
-    const task = await Task.findOne({ _id: req.params.id, assignedBy: req.user._id });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedBy: req.user._id,
+      organizationId: req.user.organizationId,
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     if (task.status !== 'not_started') {
@@ -358,15 +398,20 @@ const cancelTask = async (req, res) => {
 // ─── GET TEAM WORKLOAD (manager) ────────────────────────────────────────────
 const getWorkload = async (req, res) => {
   try {
-    const employees = await User.find({ managerId: req.user._id, role: 'employee', isActive: true })
-      .select('name email department');
+    const employees = await User.find({
+      managerId: req.user._id,
+      role: 'employee',
+      isActive: true,
+      organizationId: req.user.organizationId,
+    }).select('name email department');
 
     const workload = await Promise.all(employees.map(async (emp) => {
-      const total     = await Task.countDocuments({ assignedTo: emp._id });
-      const active    = await Task.countDocuments({ assignedTo: emp._id, status: { $in: ['not_started', 'in_progress'] } });
-      const completed = await Task.countDocuments({ assignedTo: emp._id, status: 'completed' });
-      const overdue   = await Task.countDocuments({ assignedTo: emp._id, status: 'overdue' });
-      const inReview  = await Task.countDocuments({ assignedTo: emp._id, status: 'under_review' });
+      const orgFilter = { assignedTo: emp._id, organizationId: req.user.organizationId };
+      const total     = await Task.countDocuments(orgFilter);
+      const active    = await Task.countDocuments({ ...orgFilter, status: { $in: ['not_started', 'in_progress'] } });
+      const completed = await Task.countDocuments({ ...orgFilter, status: 'completed' });
+      const overdue   = await Task.countDocuments({ ...orgFilter, status: 'overdue' });
+      const inReview  = await Task.countDocuments({ ...orgFilter, status: 'under_review' });
       return { employee: emp, total, active, completed, overdue, inReview };
     }));
 
@@ -382,7 +427,11 @@ const uploadTaskFile = async (req, res) => {
     const { uploadToCloudinary } = require('../middleware/upload');
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
-    const task = await Task.findOne({ _id: req.params.id, assignedBy: req.user._id });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedBy: req.user._id,
+      organizationId: req.user.organizationId,
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     const fileData = await uploadToCloudinary(req.file);
@@ -407,7 +456,11 @@ const uploadDeliverable = async (req, res) => {
     const { uploadToCloudinary } = require('../middleware/upload');
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
-    const task = await Task.findOne({ _id: req.params.id, assignedTo: req.user._id });
+    const task = await Task.findOne({
+      _id: req.params.id,
+      assignedTo: req.user._id,
+      organizationId: req.user.organizationId,
+    });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     if (!['in_progress', 'under_review'].includes(task.status)) {
