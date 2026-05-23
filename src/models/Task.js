@@ -2,6 +2,13 @@ const mongoose = require('mongoose');
 
 const taskSchema = new mongoose.Schema(
   {
+    // ── Multi-tenant isolation ─────────────────────────────────────────────
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Organization',
+      required: true,
+      index: true,
+    },
     title: {
       type: String,
       required: [true, 'Task title is required'],
@@ -12,12 +19,6 @@ const taskSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Task description is required'],
       maxlength: [5000, 'Description cannot exceed 5000 characters'],
-    },
-    organizationId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Organization',
-      required: true,
-      index: true,
     },
     priority: {
       type: String,
@@ -79,7 +80,5 @@ const taskSchema = new mongoose.Schema(
 
 // Auto-mark overdue tasks
 taskSchema.index({ deadline: 1, status: 1 });
-
-taskSchema.index({ organizationId: 1 });
 
 module.exports = mongoose.model('Task', taskSchema);
