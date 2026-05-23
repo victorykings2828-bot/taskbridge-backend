@@ -14,6 +14,7 @@ const getOrgAnalytics = async (req, res) => {
     if (!orgId) return res.status(400).json({ success: false, message: 'No organisation found' });
 
     const org = await Organization.findById(orgId).select('name subscriptionTier limits storage');
+    if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
 
     // Task model uses: assignedBy (manager), assignedTo (employee)
     // Always scope to this organisation first
@@ -63,7 +64,7 @@ const getOrgAnalytics = async (req, res) => {
     }
 
     // Employee performance — Task model uses 'assignedTo' not 'assigneeId'
-    const employeePerformance = await Task.aggregate([
+    const employeePerformanceRaw = await Task.aggregate([
       { $match: { ...taskFilter, assignedTo: { $exists: true } } },
       {
         $group: {
@@ -83,20 +84,18 @@ const getOrgAnalytics = async (req, res) => {
           total:     1,
           completed: 1,
           overdue:   1,
-          rate: {
-            $cond: [
-              { $eq: ['$total', 0] }, 0,
-              { $round: [{ $multiply: [{ $divide: ['$completed', '$total'] }, 100] }, 0] },
-            ],
-          },
         },
       },
     ]);
+    const employeePerformance = employeePerformanceRaw.map((emp) => ({
+      ...emp,
+      rate: emp.total > 0 ? Math.round((emp.completed / emp.total) * 100) : 0,
+    }));
 
     // Manager performance (super_admin only) — Task model uses 'assignedBy' not 'managerId'
     let managerPerformance = [];
     if (user.role === 'super_admin') {
-      managerPerformance = await Task.aggregate([
+      const managerPerformanceRaw = await Task.aggregate([
         { $match: { organizationId: orgId, assignedBy: { $exists: true } } },
         {
           $group: {
@@ -115,15 +114,13 @@ const getOrgAnalytics = async (req, res) => {
             totalAssigned: 1,
             completed:     1,
             overdue:       1,
-            rate: {
-              $cond: [
-                { $eq: ['$totalAssigned', 0] }, 0,
-                { $round: [{ $multiply: [{ $divide: ['$completed', '$totalAssigned'] }, 100] }, 0] },
-              ],
-            },
           },
         },
       ]);
+      managerPerformance = managerPerformanceRaw.map((mgr) => ({
+        ...mgr,
+        rate: mgr.totalAssigned > 0 ? Math.round((mgr.completed / mgr.totalAssigned) * 100) : 0,
+      }));
     }
 
     // Feedback — Feedback model has no organizationId, so filter via tasks in this org

@@ -63,9 +63,10 @@ const getAllManagers = async (req, res) => {
         Task.countDocuments({ assignedBy: mgr._id, organizationId: orgId, status: 'completed' }),
         Task.countDocuments({ assignedBy: mgr._id, organizationId: orgId, status: 'overdue' }),
       ]);
+      const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
       return {
         ...mgr.toJSON(),
-        stats: { teamSize, totalTasks, completedTasks, overdueTasks },
+        stats: { teamSize, totalTasks, completedTasks, overdueTasks, completionRate },
       };
     }));
 
@@ -86,18 +87,29 @@ const getManagerProfile = async (req, res) => {
     const employees = await User.find({ managerId: mgr._id, organizationId: orgId, role: 'employee' })
       .select('name email department isActive createdAt');
 
-    const [totalTasks, completedTasks, overdueTasks, underReview] = await Promise.all([
+    const recentTasks = await Task.find({ assignedBy: mgr._id, organizationId: orgId })
+      .populate('assignedTo', 'name email')
+      .sort({ updatedAt: -1 })
+      .limit(20)
+      .select('title status priority deadline assignedTo updatedAt');
+
+    const [totalTasks, completedTasks, overdueTasks, underReviewTasks, inProgressTasks] = await Promise.all([
       Task.countDocuments({ assignedBy: mgr._id, organizationId: orgId }),
       Task.countDocuments({ assignedBy: mgr._id, organizationId: orgId, status: 'completed' }),
       Task.countDocuments({ assignedBy: mgr._id, organizationId: orgId, status: 'overdue' }),
       Task.countDocuments({ assignedBy: mgr._id, organizationId: orgId, status: 'under_review' }),
+      Task.countDocuments({ assignedBy: mgr._id, organizationId: orgId, status: 'in_progress' }),
     ]);
+    const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+    const taskStats = { totalTasks, completedTasks, overdueTasks, underReviewTasks, inProgressTasks, completionRate };
 
     res.json({
       success: true,
       manager: mgr,
       employees,
-      stats: { totalTasks, completedTasks, overdueTasks, underReview },
+      taskStats,
+      stats: taskStats,
+      recentTasks,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch manager profile' });
@@ -143,11 +155,12 @@ const getEmployeeProfile = async (req, res) => {
       .limit(20)
       .select('title status priority deadline assignedBy createdAt');
 
-    const [totalTasks, completedTasks, overdueTasks, inProgress] = await Promise.all([
+    const [totalTasks, completedTasks, overdueTasks, inProgressTasks, underReviewTasks] = await Promise.all([
       Task.countDocuments({ assignedTo: emp._id, organizationId: orgId }),
       Task.countDocuments({ assignedTo: emp._id, organizationId: orgId, status: 'completed' }),
       Task.countDocuments({ assignedTo: emp._id, organizationId: orgId, status: 'overdue' }),
       Task.countDocuments({ assignedTo: emp._id, organizationId: orgId, status: 'in_progress' }),
+      Task.countDocuments({ assignedTo: emp._id, organizationId: orgId, status: 'under_review' }),
     ]);
 
     const feedbacks = await Feedback.find({ givenTo: emp._id })
@@ -160,7 +173,18 @@ const getEmployeeProfile = async (req, res) => {
       employee: emp,
       tasks,
       feedbacks,
-      stats: { totalTasks, completedTasks, overdueTasks, inProgress },
+      avgRating: feedbacks.length > 0
+        ? Math.round((feedbacks.reduce((sum, fb) => sum + fb.rating, 0) / feedbacks.length) * 10) / 10
+        : null,
+      taskStats: {
+        totalTasks,
+        completedTasks,
+        overdueTasks,
+        inProgressTasks,
+        underReviewTasks,
+        completionRate: totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0,
+      },
+      stats: { totalTasks, completedTasks, overdueTasks, inProgressTasks, underReviewTasks },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch employee profile' });
@@ -191,4 +215,41 @@ const notifyAll = async (req, res) => {
   }
 };
 
-module.exports = { getSystemOverview, getAllManagers, getManagerProfile, getAllEmployees, getEmployeeProfile, notifyAll };
+// POST /api/admin/feedback - super admin feedback for an employee
+const adminGiveFeedback = async (req, res) => {
+  try {
+    const { employeeId, rating, comment } = req.body;
+    if (!employeeId) return res.status(400).json({ success: false, message: 'Employee is required' });
+    if (!rating || rating < 1 || rating > 5)
+      return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5' });
+
+    const employee = await User.findOne({
+      _id: employeeId,
+      organizationId: req.user.organizationId,
+      role: 'employee',
+    });
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+    const feedback = await Feedback.create({
+      task: null,
+      givenBy: req.user._id,
+      givenTo: employee._id,
+      rating,
+      comment,
+      type: 'admin_to_employee',
+    });
+
+    await Notification.create({
+      recipient: employee._id,
+      type: 'feedback_received',
+      title: 'Performance feedback received',
+      message: `${req.user.name} rated your performance ${rating}/5`,
+    });
+
+    res.status(201).json({ success: true, message: 'Feedback submitted', feedback });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to submit feedback' });
+  }
+};
+
+module.exports = { getSystemOverview, getAllManagers, getManagerProfile, getAllEmployees, getEmployeeProfile, notifyAll, adminGiveFeedback };

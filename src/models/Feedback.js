@@ -9,7 +9,7 @@ const feedbackSchema = new mongoose.Schema(
     comment: { type: String, maxlength: 1000 },
     type: {
       type: String,
-      enum: ['manager_to_employee', 'employee_to_task'],
+      enum: ['manager_to_employee', 'employee_to_task', 'admin_to_employee'],
       required: true,
     },
   },
