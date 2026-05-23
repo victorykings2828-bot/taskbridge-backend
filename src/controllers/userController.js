@@ -281,4 +281,52 @@ const getDashboardStats = async (req, res) => {
   }
 };
 
-module.exports = { createUser, getUsers, getUserById, updateUser, getDashboardStats };
+// POST /api/users/:id/reset-password — admin resets a user's password
+const resetUserPassword = async (req, res) => {
+  try {
+    const requester = req.user;
+    const user = await User.findOne({
+      _id: req.params.id,
+      organizationId: requester.organizationId,
+    }).select('+password');
+
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Permission check
+    if (requester.role === 'manager' &&
+      (user.role !== 'employee' || user.managerId?.toString() !== requester._id.toString())) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    if (requester.role === 'employee') {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const tempPassword = generateTempPassword();
+    user.password = tempPassword;
+    user.isFirstLogin = true;
+    await user.save();
+
+    // Try to send email with new password
+    try { await sendWelcomeEmail(user, tempPassword); } catch (e) { /* email not configured */ }
+
+    await AuditLog.create({
+      performedBy: requester._id,
+      action: 'PASSWORD_RESET_BY_ADMIN',
+      targetModel: 'User',
+      targetId: user._id,
+      details: { email: user.email },
+      ipAddress: req.ip,
+    });
+
+    res.json({
+      success: true,
+      message: 'Password reset successfully',
+      tempPassword,
+    });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ success: false, message: 'Failed to reset password' });
+  }
+};
+
+module.exports = { createUser, getUsers, getUserById, updateUser, getDashboardStats, resetUserPassword };
