@@ -3,9 +3,8 @@ const Organization = require('../models/Organization');
 const AuditLog = require('../models/AuditLog');
 const Notification = require('../models/Notification');
 const { sendWelcomeEmail } = require('../utils/email');
-const { v4: uuidv4 } = require('uuid');
 
-// Generate a cryptographically strong temp password
+// Generate a strong temp password
 const generateTempPassword = () => {
   const upper   = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
   const lower   = 'abcdefghjkmnpqrstuvwxyz';
@@ -18,13 +17,17 @@ const generateTempPassword = () => {
   return [...required, ...rest].sort(() => Math.random() - 0.5).join('');
 };
 
-// POST /api/users - Create user (super_admin creates manager OR employee, manager creates employee)
+// POST /api/users
 const createUser = async (req, res) => {
   try {
     const { name, email, role, department, phone } = req.body;
     const creator = req.user;
 
-    // Role permission check — super_admin can create both manager and employee
+    if (!name || !email || !role) {
+      return res.status(400).json({ success: false, message: 'Name, email, and role are required' });
+    }
+
+    // Role permission check
     if (creator.role === 'super_admin' && !['manager', 'employee'].includes(role)) {
       return res.status(403).json({ success: false, message: 'Super Admin can only create Managers or Employees' });
     }
@@ -32,74 +35,78 @@ const createUser = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Manager can only create Employees' });
     }
 
-    // ── Subscription tier limit enforcement ──────────────────────────────────
-    if (creator.organizationId) {
-      const org = await Organization.findById(creator.organizationId);
-      if (org) {
-        if (role === 'manager') {
-          const managerCount = await User.countDocuments({ organizationId: org._id, role: 'manager', isActive: true });
-          if (managerCount >= org.limits.managers) {
-            return res.status(403).json({
-              success: false,
-              message: `Your ${org.subscriptionTier} plan allows a maximum of ${org.limits.managers} manager${org.limits.managers > 1 ? 's' : ''}. Upgrade to add more.`,
-              upgradeRequired: true,
-            });
-          }
-        }
-        if (role === 'employee') {
-          const empCount = await User.countDocuments({ organizationId: org._id, role: 'employee', isActive: true });
-          if (empCount >= org.limits.totalEmployees) {
-            return res.status(403).json({
-              success: false,
-              message: `Your ${org.subscriptionTier} plan allows a maximum of ${org.limits.totalEmployees} employees. Upgrade to add more.`,
-              upgradeRequired: true,
-            });
-          }
-          // Per-manager limit
-          if (creator.role === 'manager') {
-            const underManager = await User.countDocuments({ managerId: creator._id, role: 'employee', isActive: true });
-            if (underManager >= org.limits.employeesPerManager) {
-              return res.status(403).json({
-                success: false,
-                message: `You have reached the limit of ${org.limits.employeesPerManager} employees on your plan. Upgrade to add more.`,
-                upgradeRequired: true,
-              });
-            }
-          }
+    // Must belong to an org
+    if (!creator.organizationId) {
+      return res.status(400).json({ success: false, message: 'You must belong to an organisation to create users' });
+    }
+
+    // Subscription limits
+    const org = await Organization.findById(creator.organizationId);
+    if (!org) {
+      return res.status(404).json({ success: false, message: 'Organisation not found' });
+    }
+
+    if (role === 'manager') {
+      const managerCount = await User.countDocuments({ organizationId: org._id, role: 'manager', isActive: true });
+      if (managerCount >= org.limits.managers) {
+        return res.status(403).json({
+          success: false,
+          message: `Your ${org.subscriptionTier} plan allows max ${org.limits.managers} manager(s). Upgrade to add more.`,
+          upgradeRequired: true,
+        });
+      }
+    }
+
+    if (role === 'employee') {
+      const empCount = await User.countDocuments({ organizationId: org._id, role: 'employee', isActive: true });
+      if (empCount >= org.limits.totalEmployees) {
+        return res.status(403).json({
+          success: false,
+          message: `Your ${org.subscriptionTier} plan allows max ${org.limits.totalEmployees} employees. Upgrade to add more.`,
+          upgradeRequired: true,
+        });
+      }
+      if (creator.role === 'manager') {
+        const underManager = await User.countDocuments({ managerId: creator._id, organizationId: org._id, role: 'employee', isActive: true });
+        if (underManager >= org.limits.employeesPerManager) {
+          return res.status(403).json({
+            success: false,
+            message: `You have reached the limit of ${org.limits.employeesPerManager} employees. Upgrade to add more.`,
+            upgradeRequired: true,
+          });
         }
       }
     }
 
-    const existing = await User.findOne({ email: email.toLowerCase() });
+    const existing = await User.findOne({ email: email.toLowerCase().trim() });
     if (existing) {
-      return res.status(409).json({ success: false, message: 'Email already in use' });
+      return res.status(409).json({ success: false, message: 'An account with this email already exists' });
     }
 
     const tempPassword = generateTempPassword();
 
     const newUser = await User.create({
-      name,
-      email: email.toLowerCase(),
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
       password: tempPassword,
       role,
       department: department || '',
       phone: phone || '',
       createdBy: creator._id,
       managerId: creator.role === 'manager' ? creator._id : null,
-      organizationId: creator.organizationId || null,
-      subscriptionTier: creator.subscriptionTier || 'free',
+      organizationId: creator.organizationId,
+      subscriptionTier: org.subscriptionTier || 'free',
       isFirstLogin: true,
     });
 
-    // Send welcome email
-    await sendWelcomeEmail(newUser, tempPassword);
+    // Try to send welcome email — don't fail if email not configured
+    try { await sendWelcomeEmail(newUser, tempPassword); } catch (e) { console.log('Email not sent (not configured):', e.message); }
 
-    // Notify new user
     await Notification.create({
       recipient: newUser._id,
       type: 'account_created',
       title: 'Welcome to TaskBridge',
-      message: `Your account has been created by ${creator.name}. Check your email for login credentials.`,
+      message: `Your account has been created by ${creator.name}. Use these credentials to log in.`,
     });
 
     await AuditLog.create({
@@ -113,27 +120,27 @@ const createUser = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: `${role.charAt(0).toUpperCase() + role.slice(1)} created successfully. Credentials sent to ${email}`,
+      message: `${role.charAt(0).toUpperCase() + role.slice(1)} created successfully`,
       user: newUser,
-      // Always return temp password so admin can share it manually
-      tempPassword,
+      tempPassword, // Always return so admin can share manually
     });
   } catch (error) {
     console.error('Create user error:', error);
-    res.status(500).json({ success: false, message: 'Failed to create user' });
+    res.status(500).json({ success: false, message: 'Failed to create user: ' + error.message });
   }
 };
 
-// GET /api/users - Get users (filtered by role of requester)
+// GET /api/users — scoped to org
 const getUsers = async (req, res) => {
   try {
     const requester = req.user;
-    let query = {};
+    let query = { organizationId: requester.organizationId };
 
     if (requester.role === 'super_admin') {
-      query = { role: 'manager' };
+      query.role = 'manager';
     } else if (requester.role === 'manager') {
-      query = { role: 'employee', managerId: requester._id };
+      query.role = 'employee';
+      query.managerId = requester._id;
     } else {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
@@ -145,17 +152,14 @@ const getUsers = async (req, res) => {
   }
 };
 
-// GET /api/users/:id - Get single user
+// GET /api/users/:id
 const getUserById = async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('-password -refreshTokens');
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Access control
     const requester = req.user;
-    if (
-      requester.role === 'employee' && requester._id.toString() !== req.params.id
-    ) {
+    if (requester.role === 'employee' && requester._id.toString() !== req.params.id) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
@@ -165,7 +169,7 @@ const getUserById = async (req, res) => {
   }
 };
 
-// PUT /api/users/:id - Update user
+// PUT /api/users/:id
 const updateUser = async (req, res) => {
   try {
     const { name, department, phone, isActive } = req.body;
@@ -184,7 +188,7 @@ const updateUser = async (req, res) => {
       action: 'USER_UPDATED',
       targetModel: 'User',
       targetId: user._id,
-      details: { updatedFields: ['name','department','phone','isActive'].filter(f => req.body[f] !== undefined) },
+      details: { updatedFields: Object.keys(req.body) },
       ipAddress: req.ip,
     });
 
@@ -194,37 +198,43 @@ const updateUser = async (req, res) => {
   }
 };
 
-// GET /api/users/stats - Dashboard stats
+// GET /api/users/stats — dashboard stats scoped to org
 const getDashboardStats = async (req, res) => {
   try {
     const requester = req.user;
     const Task = require('../models/Task');
+    const orgId = requester.organizationId;
 
     if (requester.role === 'super_admin') {
-      const totalManagers = await User.countDocuments({ role: 'manager' });
-      const totalEmployees = await User.countDocuments({ role: 'employee' });
-      const totalTasks = await Task.countDocuments();
-      const recentManagers = await User.find({ role: 'manager' })
-        .sort({ createdAt: -1 })
-        .limit(5)
-        .select('name email department createdAt isActive');
+      const [totalManagers, totalEmployees, totalTasks, completedTasks, inProgressTasks, overdueTasks, underReviewTasks, recentActivity] = await Promise.all([
+        User.countDocuments({ organizationId: orgId, role: 'manager', isActive: true }),
+        User.countDocuments({ organizationId: orgId, role: 'employee', isActive: true }),
+        Task.countDocuments({ organizationId: orgId }),
+        Task.countDocuments({ organizationId: orgId, status: 'completed' }),
+        Task.countDocuments({ organizationId: orgId, status: 'in_progress' }),
+        Task.countDocuments({ organizationId: orgId, status: 'overdue' }),
+        Task.countDocuments({ organizationId: orgId, status: 'under_review' }),
+        Task.find({ organizationId: orgId }).sort({ createdAt: -1 }).limit(10)
+          .populate('assignedTo', 'name').populate('assignedBy', 'name')
+          .select('title status priority deadline assignedTo assignedBy createdAt'),
+      ]);
 
       return res.json({
         success: true,
-        stats: { totalManagers, totalEmployees, totalTasks },
-        recentManagers,
+        stats: { totalManagers, totalEmployees, totalTasks, completedTasks, inProgressTasks, overdueTasks, underReviewTasks },
+        recentActivity,
       });
     }
 
     if (requester.role === 'manager') {
-      const myEmployees = await User.find({ managerId: requester._id }).select('_id');
-      const employeeIds = myEmployees.map((e) => e._id);
-      const totalEmployees = myEmployees.length;
-      const totalTasks = await Task.countDocuments({ assignedBy: requester._id });
-      const completedTasks = await Task.countDocuments({ assignedBy: requester._id, status: 'completed' });
-      const pendingTasks = await Task.countDocuments({ assignedBy: requester._id, status: { $in: ['not_started', 'in_progress'] } });
-      const overdueTasks = await Task.countDocuments({ assignedBy: requester._id, deadline: { $lt: new Date() }, status: { $nin: ['completed', 'cancelled'] } });
-      const underReviewTasks = await Task.countDocuments({ assignedBy: requester._id, status: 'under_review' });
+      const [totalEmployees, totalTasks, completedTasks, pendingTasks, overdueTasks, underReviewTasks] = await Promise.all([
+        User.countDocuments({ managerId: requester._id, organizationId: orgId, role: 'employee', isActive: true }),
+        Task.countDocuments({ assignedBy: requester._id, organizationId: orgId }),
+        Task.countDocuments({ assignedBy: requester._id, organizationId: orgId, status: 'completed' }),
+        Task.countDocuments({ assignedBy: requester._id, organizationId: orgId, status: { $in: ['not_started', 'in_progress'] } }),
+        Task.countDocuments({ assignedBy: requester._id, organizationId: orgId, deadline: { $lt: new Date() }, status: { $nin: ['completed', 'cancelled'] } }),
+        Task.countDocuments({ assignedBy: requester._id, organizationId: orgId, status: 'under_review' }),
+      ]);
 
       return res.json({
         success: true,
@@ -233,11 +243,13 @@ const getDashboardStats = async (req, res) => {
     }
 
     if (requester.role === 'employee') {
-      const totalTasks = await Task.countDocuments({ assignedTo: requester._id });
-      const completedTasks = await Task.countDocuments({ assignedTo: requester._id, status: 'completed' });
-      const inProgressTasks = await Task.countDocuments({ assignedTo: requester._id, status: 'in_progress' });
-      const overdueTasks = await Task.countDocuments({ assignedTo: requester._id, deadline: { $lt: new Date() }, status: { $nin: ['completed', 'cancelled'] } });
-      const notStartedTasks = await Task.countDocuments({ assignedTo: requester._id, status: 'not_started' });
+      const [totalTasks, completedTasks, inProgressTasks, overdueTasks, notStartedTasks] = await Promise.all([
+        Task.countDocuments({ assignedTo: requester._id, organizationId: orgId }),
+        Task.countDocuments({ assignedTo: requester._id, organizationId: orgId, status: 'completed' }),
+        Task.countDocuments({ assignedTo: requester._id, organizationId: orgId, status: 'in_progress' }),
+        Task.countDocuments({ assignedTo: requester._id, organizationId: orgId, deadline: { $lt: new Date() }, status: { $nin: ['completed', 'cancelled'] } }),
+        Task.countDocuments({ assignedTo: requester._id, organizationId: orgId, status: 'not_started' }),
+      ]);
 
       return res.json({
         success: true,
