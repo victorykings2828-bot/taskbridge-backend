@@ -66,7 +66,6 @@ const inviteSchema = new mongoose.Schema(
 );
 
 // Index for fast lookups
-inviteSchema.index({ codeHash: 1 });
 inviteSchema.index({ organizationId: 1, status: 1 });
 inviteSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // TTL index
 

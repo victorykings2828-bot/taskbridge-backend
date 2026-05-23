@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authorize, requirePasswordChanged } = require('../middleware/auth');
 const {
   registerOrganization, joinOrganization,
   createInvite, acceptInvite, listInvites, revokeInvite,
@@ -16,13 +16,13 @@ router.post('/invite/accept',  acceptInvite);  // accept invite (creates account
 
 // Authenticated
 router.post('/join',           authenticate, joinOrganization);
-router.get('/me',              authenticate, getMyOrganization);
-router.post('/upgrade',        authenticate, upgradePlan);
-router.post('/storage/extra',  authenticate, purchaseExtraStorage);
-router.delete('/storage/clean',authenticate, cleanStorage);
-router.post('/joincode/rotate',authenticate, rotateJoinCode);
-router.post('/invite',         authenticate, createInvite);
-router.get('/invites',         authenticate, listInvites);
-router.delete('/invites/:id',  authenticate, revokeInvite);
+router.get('/me',              authenticate, requirePasswordChanged, getMyOrganization);
+router.post('/upgrade',        authenticate, requirePasswordChanged, authorize('super_admin'), upgradePlan);
+router.post('/storage/extra',  authenticate, requirePasswordChanged, authorize('super_admin'), purchaseExtraStorage);
+router.delete('/storage/clean',authenticate, requirePasswordChanged, authorize('super_admin'), cleanStorage);
+router.post('/joincode/rotate',authenticate, requirePasswordChanged, authorize('super_admin'), rotateJoinCode);
+router.post('/invite',         authenticate, requirePasswordChanged, authorize('super_admin'), createInvite);
+router.get('/invites',         authenticate, requirePasswordChanged, authorize('super_admin'), listInvites);
+router.delete('/invites/:id',  authenticate, requirePasswordChanged, authorize('super_admin'), revokeInvite);
 
 module.exports = router;

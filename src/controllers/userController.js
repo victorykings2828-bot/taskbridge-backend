@@ -155,11 +155,21 @@ const getUsers = async (req, res) => {
 // GET /api/users/:id
 const getUserById = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password -refreshTokens');
+    const user = await User.findOne({
+      _id: req.params.id,
+      organizationId: req.user.organizationId,
+    }).select('-password -refreshTokens');
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     const requester = req.user;
     if (requester.role === 'employee' && requester._id.toString() !== req.params.id) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    if (
+      requester.role === 'manager' &&
+      requester._id.toString() !== req.params.id &&
+      (user.role !== 'employee' || user.managerId?.toString() !== requester._id.toString())
+    ) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
@@ -173,8 +183,17 @@ const getUserById = async (req, res) => {
 const updateUser = async (req, res) => {
   try {
     const { name, department, phone, isActive } = req.body;
-    const user = await User.findById(req.params.id);
+    const user = await User.findOne({
+      _id: req.params.id,
+      organizationId: req.user.organizationId,
+    });
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (
+      req.user.role === 'manager' &&
+      (user.role !== 'employee' || user.managerId?.toString() !== req.user._id.toString())
+    ) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
 
     if (name) user.name = name;
     if (department !== undefined) user.department = department;

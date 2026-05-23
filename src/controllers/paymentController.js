@@ -153,6 +153,15 @@ const verifyPayment = async (req, res) => {
 
     const org = await Organization.findById(notes.organizationId);
     if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
+    if (org._id.toString() !== req.user.organizationId?.toString() || notes.userId !== req.user._id.toString())
+      return res.status(403).json({ success: false, message: 'Payment order does not belong to this account' });
+
+    const alreadyApplied = await AuditLog.findOne({
+      action: { $in: ['SUBSCRIPTION_UPGRADED', 'STORAGE_PURCHASED'] },
+      'details.paymentId': razorpay_payment_id,
+    });
+    if (alreadyApplied)
+      return res.status(409).json({ success: false, message: 'This payment has already been applied' });
 
     // ── Plan upgrade ──────────────────────────────────────────────────────
     if (notes.type === 'plan_upgrade' && notes.tier) {
@@ -215,18 +224,20 @@ const handleWebhook = async (req, res) => {
   try {
     const signature = req.headers['x-razorpay-signature'];
     const secret    = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const rawBody   = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
 
     if (secret) {
       const expected = crypto
         .createHmac('sha256', secret)
-        .update(JSON.stringify(req.body))
+        .update(rawBody)
         .digest('hex');
       if (expected !== signature)
         return res.status(400).json({ error: 'Invalid webhook signature' });
     }
 
-    const event   = req.body.event;
-    const payload = req.body.payload;
+    const body    = Buffer.isBuffer(req.body) ? JSON.parse(rawBody.toString('utf8')) : req.body;
+    const event   = body.event;
+    const payload = body.payload;
 
     console.log(`Razorpay webhook: ${event}`);
 

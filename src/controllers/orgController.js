@@ -160,6 +160,7 @@ const createInvite = async (req, res) => {
   try {
     const { email, role = 'employee', expiryHours = 48 } = req.body;
     if (!email || !EMAIL_RE.test(email)) return res.status(400).json({ success: false, message: 'Valid email is required' });
+    if (!['manager', 'employee'].includes(role)) return res.status(400).json({ success: false, message: 'Invalid invite role' });
     if (!req.user.organizationId) return res.status(400).json({ success: false, message: 'No organisation found' });
 
     await Invite.updateMany({ organizationId: req.user.organizationId, email: email.toLowerCase(), status: 'pending' }, { status: 'revoked' });
@@ -256,20 +257,10 @@ const getMyOrganization = async (req, res) => {
 // POST /api/org/upgrade
 const upgradePlan = async (req, res) => {
   try {
-    const { tier } = req.body;
-    if (!['pro','enterprise'].includes(tier)) return res.status(400).json({ success: false, message: 'Invalid plan' });
-    const user = await User.findById(req.user._id);
-    if (user.role !== 'super_admin') return res.status(403).json({ success: false, message: 'Admins only' });
-    const org = await Organization.findById(user.organizationId);
-    if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
-    org.subscriptionTier = tier;
-    org.subscriptionStatus = 'active';
-    org.subscriptionExpiresAt = new Date(Date.now() + 30*24*3600*1000);
-    org.applyTierLimits();
-    await org.save();
-    await User.updateMany({ organizationId: org._id }, { subscriptionTier: tier });
-    await AuditLog.create({ performedBy: req.user._id, action: 'SUBSCRIPTION_UPGRADED', targetModel: 'Organization', targetId: org._id, details: { tier } });
-    res.json({ success: true, message: `Upgraded to ${tier} plan!`, organization: { subscriptionTier: org.subscriptionTier, limits: org.limits, storageFormatted: fmtBytes(org.limits.storageLimitBytes) } });
+    res.status(410).json({
+      success: false,
+      message: 'Direct plan upgrades are disabled. Use the verified payment flow.',
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Upgrade failed' });
   }
