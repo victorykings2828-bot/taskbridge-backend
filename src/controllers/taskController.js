@@ -8,14 +8,33 @@ const createTask = async (req, res) => {
   try {
     const { title, description, priority, deadline, assignedTo } = req.body;
 
-    const employee = await User.findOne({
+    // Resolve the assignee within the same organization.
+    const assignee = await User.findOne({
       _id: assignedTo,
-      managerId: req.user._id,
-      role: 'employee',
       organizationId: req.user.organizationId,
+      isActive: true,
     });
-    if (!employee) {
-      return res.status(400).json({ success: false, message: 'Employee not found or not under your management' });
+    if (!assignee) {
+      return res.status(400).json({ success: false, message: 'Assigned user not found in your organization' });
+    }
+
+    // Hierarchy rules:
+    //  - super_admin can assign to any manager or employee
+    //  - manager can assign only to employees who report to them
+    if (req.user.role === 'manager') {
+      const isOwnEmployee =
+        assignee.role === 'employee' &&
+        assignee.managerId &&
+        assignee.managerId.toString() === req.user._id.toString();
+      if (!isOwnEmployee) {
+        return res.status(403).json({ success: false, message: 'You can only assign tasks to employees on your team' });
+      }
+    } else if (req.user.role === 'super_admin') {
+      if (!['manager', 'employee'].includes(assignee.role)) {
+        return res.status(400).json({ success: false, message: 'Tasks can only be assigned to managers or employees' });
+      }
+    } else {
+      return res.status(403).json({ success: false, message: 'You are not allowed to create tasks' });
     }
 
     const task = await Task.create({
@@ -65,8 +84,13 @@ const getTasks = async (req, res) => {
     // Always filter by organization first
     let query = { organizationId: requester.organizationId };
 
-    if (requester.role === 'manager') query.assignedBy = requester._id;
-    else if (requester.role === 'employee') query.assignedTo = requester._id;
+    // Managers see tasks they assigned AND tasks assigned to them (by super admin).
+    // Employees see only their own assigned tasks. Super admins see everything.
+    if (requester.role === 'manager') {
+      query.$or = [{ assignedBy: requester._id }, { assignedTo: requester._id }];
+    } else if (requester.role === 'employee') {
+      query.assignedTo = requester._id;
+    }
 
     if (status) query.status = status;
     if (priority) query.priority = priority;
@@ -127,6 +151,11 @@ const updateTaskStatus = async (req, res) => {
       organizationId: req.user.organizationId,
     });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
+
+    // Only the person the task is assigned to can change its work status.
+    if (task.assignedTo.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ success: false, message: 'You can only update tasks assigned to you' });
+    }
 
     const validTransitions = {
       not_started: ['in_progress'],

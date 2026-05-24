@@ -15,15 +15,18 @@ router.use(authenticate, requirePasswordChanged);
 router.get('/workload', authorize('manager'), getWorkload);
 router.get('/', getTasks);
 router.get('/:id', getTaskById);
-router.post('/', authorize('manager'), createTask);
-router.put('/:id', authorize('manager'), editTask);
-router.delete('/:id', authorize('manager'), cancelTask);
-router.put('/:id/status', authorize('employee'), updateTaskStatus);
-router.put('/:id/accept', authorize('employee'), acceptOrFlagTask);
-router.put('/:id/review', authorize('manager'), reviewTask);
-router.put('/:id/extension', authorize('employee'), requestExtension);
-router.put('/:id/extension/review', authorize('manager'), reviewExtension);
-router.post('/:id/upload', authorize('manager'), upload.single('file'), uploadTaskFile);
-router.post('/:id/deliverables', authorize('employee'), upload.single('file'), uploadDeliverable);
+router.post('/', authorize('super_admin', 'manager'), createTask);
+router.put('/:id', authorize('super_admin', 'manager'), editTask);
+router.delete('/:id', authorize('super_admin', 'manager'), cancelTask);
+// Assignees act on their own tasks. A manager can be an assignee (assigned by
+// super admin), so these allow both employee and manager roles; the controller
+// enforces that the requester is the actual assignee.
+router.put('/:id/status', authorize('employee', 'manager'), updateTaskStatus);
+router.put('/:id/accept', authorize('employee', 'manager'), acceptOrFlagTask);
+router.put('/:id/review', authorize('super_admin', 'manager'), reviewTask);
+router.put('/:id/extension', authorize('employee', 'manager'), requestExtension);
+router.put('/:id/extension/review', authorize('super_admin', 'manager'), reviewExtension);
+router.post('/:id/upload', authorize('super_admin', 'manager'), upload.single('file'), uploadTaskFile);
+router.post('/:id/deliverables', authorize('employee', 'manager'), upload.single('file'), uploadDeliverable);
 
 module.exports = router;

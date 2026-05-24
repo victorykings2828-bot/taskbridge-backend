@@ -2,20 +2,7 @@ const User = require('../models/User');
 const Organization = require('../models/Organization');
 const AuditLog = require('../models/AuditLog');
 const Notification = require('../models/Notification');
-const { sendWelcomeEmail } = require('../utils/email');
-
-// Generate a strong temp password
-const generateTempPassword = () => {
-  const upper   = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-  const lower   = 'abcdefghjkmnpqrstuvwxyz';
-  const digits  = '23456789';
-  const special = '@#$!';
-  const all     = upper + lower + digits + special;
-  const rand    = (set) => set[Math.floor(Math.random() * set.length)];
-  const required = [rand(upper), rand(lower), rand(digits), rand(special)];
-  const rest = Array.from({ length: 8 }, () => rand(all));
-  return [...required, ...rest].sort(() => Math.random() - 0.5).join('');
-};
+const { sendAccountInviteEmail } = require('../utils/email');
 
 // POST /api/users
 const createUser = async (req, res) => {
@@ -107,12 +94,11 @@ const createUser = async (req, res) => {
       }
     }
 
-    const tempPassword = generateTempPassword();
-
+    // No password is set here — the user creates their own via the
+    // setup-account flow on first login. password defaults to null.
     const newUser = await User.create({
       name: name.trim(),
       email: email.toLowerCase().trim(),
-      password: tempPassword,
       role,
       department: department || '',
       phone: phone || '',
@@ -120,17 +106,19 @@ const createUser = async (req, res) => {
       managerId: assignedManagerId,
       organizationId: creator.organizationId,
       subscriptionTier: org.subscriptionTier || 'free',
+      isRegistered: false,
       isFirstLogin: true,
     });
 
-    // Try to send welcome email — don't fail if email not configured
-    try { await sendWelcomeEmail(newUser, tempPassword); } catch (e) { console.log('Email not sent (not configured):', e.message); }
+    // Invite email pointing the user at the login/setup page — non-blocking.
+    const loginUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0] + '/login';
+    try { await sendAccountInviteEmail(newUser, loginUrl); } catch (e) { console.log('Invite email not sent:', e.message); }
 
     await Notification.create({
       recipient: newUser._id,
       type: 'account_created',
       title: 'Welcome to TaskBridge',
-      message: `Your account has been created by ${creator.name}. Use these credentials to log in.`,
+      message: `Your account has been created by ${creator.name}. Sign in with your email to set your password.`,
     });
 
     await AuditLog.create({
@@ -144,9 +132,8 @@ const createUser = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: `${role.charAt(0).toUpperCase() + role.slice(1)} created successfully`,
+      message: `${role.charAt(0).toUpperCase() + role.slice(1)} created. They can sign in with their email to set a password.`,
       user: newUser,
-      tempPassword, // Always return so admin can share manually
     });
   } catch (error) {
     console.error('Create user error:', error);
@@ -330,13 +317,16 @@ const resetUserPassword = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    const tempPassword = generateTempPassword();
-    user.password = tempPassword;
+    // Clear the password so the user re-runs the setup-account flow on next login.
+    user.password = null;
+    user.isRegistered = false;
     user.isFirstLogin = true;
+    user.refreshTokens = []; // sign out all sessions
     await user.save();
 
-    // Try to send email with new password
-    try { await sendWelcomeEmail(user, tempPassword); } catch (e) { /* email not configured */ }
+    // Invite the user back to set a new password — non-blocking.
+    const loginUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0] + '/login';
+    try { await sendAccountInviteEmail(user, loginUrl); } catch (e) { /* email not configured */ }
 
     await AuditLog.create({
       performedBy: requester._id,
@@ -349,8 +339,7 @@ const resetUserPassword = async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Password reset successfully',
-      tempPassword,
+      message: `${user.name}'s password has been cleared. They can sign in with their email to set a new one.`,
     });
   } catch (error) {
     console.error('Reset password error:', error);

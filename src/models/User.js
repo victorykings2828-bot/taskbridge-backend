@@ -19,9 +19,9 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      required: [true, 'Password is required'],
       minlength: [8, 'Password must be at least 8 characters'],
       select: false,
+      default: null, // null until the user completes account setup
     },
     organizationId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -41,6 +41,12 @@ const userSchema = new mongoose.Schema(
     isFirstLogin: {
       type: Boolean,
       default: true,
+    },
+    // True once the user has set their own password via the setup-account flow.
+    // Super admins (who register with a password) are registered immediately.
+    isRegistered: {
+      type: Boolean,
+      default: false,
     },
     isActive: {
       type: Boolean,
@@ -90,15 +96,16 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Hash password before saving
+// Hash password before saving (skip when password is null — user not set up yet)
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+  if (!this.isModified('password') || !this.password) return next();
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
 
-// Compare password
+// Compare password (returns false if no password set yet)
 userSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.password) return false;
   return await bcrypt.compare(candidatePassword, this.password);
 };
 

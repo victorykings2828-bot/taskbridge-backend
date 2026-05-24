@@ -1,62 +1,93 @@
 const nodemailer = require('nodemailer');
 
-// Create transporter - will be real when EMAIL_USER is set
+const emailConfigured = () => Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+
+// Create transporter — real SMTP when EMAIL_USER/EMAIL_PASS are set.
+// NOTE: We do NOT use `service: 'gmail'`. On some hosts (e.g. Render) that path
+// resolves over IPv6 and fails with ENETUNREACH / connection timeout. We pin an
+// explicit SMTP host on port 587 (STARTTLS) and force IPv4 with `family: 4`.
 const createTransporter = () => {
-  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+  if (emailConfigured()) {
     return nodemailer.createTransport({
-      service: 'gmail',
+      host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.EMAIL_PORT || '587', 10),
+      secure: false,        // false for port 587 (STARTTLS); true only for 465
+      family: 4,            // force IPv4 — fixes ENETUNREACH on Render
       auth: {
         user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
+        pass: process.env.EMAIL_PASS, // must be a Gmail App Password, not the login password
       },
+      connectionTimeout: 15000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
     });
   }
-  // Mock transporter for development
+  // Mock transporter for local dev when no credentials are configured
   return {
     sendMail: async (options) => {
-      console.log('📧 [MOCK EMAIL]');
+      console.log('📧 [MOCK EMAIL — set EMAIL_USER/EMAIL_PASS to send for real]');
       console.log('  To:', options.to);
       console.log('  Subject:', options.subject);
-      console.log('  Body:', options.text || options.html);
       return { messageId: 'mock-' + Date.now() };
     },
+    verify: async () => true,
   };
 };
 
 const sendEmail = async ({ to, subject, html, text }) => {
+  const transporter = createTransporter();
   try {
-    const transporter = createTransporter();
     const info = await transporter.sendMail({
-      from: process.env.EMAIL_FROM || 'TaskBridge <noreply@taskbridge.io>',
+      from: process.env.EMAIL_FROM || `TaskBridge <${process.env.EMAIL_USER || 'noreply@taskbridge.io'}>`,
       to,
       subject,
       html,
       text,
     });
+    if (emailConfigured()) console.log(`✅ Email sent to ${to} (id: ${info.messageId})`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error('Email send error:', error.message);
-    return { success: false, error: error.message };
+    // Detailed logging so SMTP/credential problems are diagnosable in Render logs
+    console.error('❌ Email send FAILED');
+    console.error('  To:        ', to);
+    console.error('  Subject:   ', subject);
+    console.error('  Error code:', error.code || 'n/a');
+    console.error('  Command:   ', error.command || 'n/a');
+    console.error('  Message:   ', error.message);
+    if (error.code === 'EAUTH') {
+      console.error('  → Auth rejected. Use a Gmail App Password (not your normal password) and confirm 2-Step Verification is on.');
+    }
+    if (error.code === 'ETIMEDOUT' || error.code === 'ENETUNREACH' || error.code === 'ECONNECTION') {
+      console.error('  → Network/connection issue. Confirm port 587 outbound is allowed and family:4 is set.');
+    }
+    return { success: false, error: error.message, code: error.code };
   }
 };
 
-const sendWelcomeEmail = async (user, tempPassword) => {
+// Sent when a super admin / manager creates an account. No password is set —
+// the user sets their own password via the setup-account flow on first login.
+const sendAccountInviteEmail = async (user, loginUrl) => {
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #1E2761;">Welcome to TaskBridge</h2>
-      <p>Hello <strong>${user.name}</strong>,</p>
-      <p>Your account has been created. Please use the credentials below to log in:</p>
-      <div style="background: #f5f5f5; padding: 16px; border-radius: 8px; margin: 16px 0;">
-        <p><strong>Email:</strong> ${user.email}</p>
-        <p><strong>Temporary Password:</strong> <code style="background:#ddd;padding:2px 6px;border-radius:4px;">${tempPassword}</code></p>
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#f8fafc;padding:32px;border-radius:12px;">
+      <div style="text-align:center;margin-bottom:24px;">
+        <div style="display:inline-block;background:#0EA5E9;width:48px;height:48px;border-radius:12px;line-height:48px;color:white;font-size:22px;font-weight:bold;">T</div>
+        <h2 style="color:#0F172A;margin-top:12px;font-size:22px;">You've been added to TaskBridge</h2>
       </div>
-      <p style="color: #e53e3e;"><strong>⚠️ You will be required to change your password on first login.</strong></p>
-      <p>Your role: <strong>${user.role.replace('_', ' ').toUpperCase()}</strong></p>
-      <hr style="border:none;border-top:1px solid #eee;margin:24px 0;"/>
-      <p style="color: #666; font-size: 12px;">If you didn't expect this email, please ignore it.</p>
+      <div style="background:#fff;border-radius:10px;padding:28px;border:1px solid #e2e8f0;">
+        <p style="color:#334155;margin-top:0;">Hello <strong>${user.name}</strong>,</p>
+        <p style="color:#475569;">An account has been created for you with the role <strong>${user.role.replace('_', ' ')}</strong>. To get started, sign in with your email and set your password.</p>
+        <div style="background:#f1f5f9;padding:14px 16px;border-radius:8px;margin:16px 0;">
+          <p style="margin:0;color:#334155;"><strong>Email:</strong> ${user.email}</p>
+        </div>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="${loginUrl}" style="background:#0EA5E9;color:#fff;padding:14px 32px;border-radius:10px;text-decoration:none;font-weight:bold;font-size:15px;display:inline-block;">Set up my account</a>
+        </div>
+        <p style="color:#94a3b8;font-size:13px;">On first sign-in you'll be asked to create your password.</p>
+      </div>
+      <p style="text-align:center;color:#cbd5e1;font-size:11px;margin-top:16px;">If you didn't expect this email, you can ignore it.</p>
     </div>
   `;
-  return sendEmail({ to: user.email, subject: 'Your Account Has Been Created', html });
+  return sendEmail({ to: user.email, subject: 'Set up your TaskBridge account', html });
 };
 
 const sendPasswordChangedEmail = async (user) => {
@@ -93,4 +124,4 @@ const sendPasswordResetEmail = async (user, resetUrl) => {
   return sendEmail({ to: user.email, subject: 'Reset your TaskBridge password', html });
 };
 
-module.exports = { sendEmail, sendWelcomeEmail, sendPasswordChangedEmail, sendPasswordResetEmail };
+module.exports = { sendEmail, sendAccountInviteEmail, sendPasswordChangedEmail, sendPasswordResetEmail };

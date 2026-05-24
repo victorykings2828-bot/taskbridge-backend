@@ -66,6 +66,14 @@ const login = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact your administrator.' });
     }
 
+    // Account created by an admin but password not yet set → require setup.
+    // Password presence is the real signal (any account that already has a
+    // password — including legacy ones — logs in normally). We respond 200 with
+    // setupRequired so the frontend can redirect to the setup-account page.
+    if (!user.password) {
+      return res.json({ success: true, setupRequired: true, email: user.email });
+    }
+
     const isMatch = await user.comparePassword(password);
 
     if (!isMatch) {
@@ -261,6 +269,78 @@ const changePassword = async (req, res) => {
   }
 };
 
+// POST /api/auth/setup-account
+// First-time password creation for accounts created by an admin.
+// Only works if the email exists AND has not been set up yet — no random signup.
+const setupAccount = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password are required' });
+    }
+
+    const complexityError = validatePasswordComplexity(password);
+    if (complexityError) {
+      return res.status(400).json({ success: false, message: complexityError });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
+
+    // No account → not invited. (Setup is invite-only; we never create accounts here.)
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'You are not invited to this company. Contact your administrator.' });
+    }
+    if (!user.isActive) {
+      return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact your administrator.' });
+    }
+    // Already set up → must use normal login / forgot-password instead.
+    if (user.password && user.isRegistered) {
+      return res.status(409).json({ success: false, message: 'Account already set up. Please sign in instead.' });
+    }
+
+    // Set the password (hashed by pre-save hook) and mark as registered.
+    user.password = password;
+    user.isRegistered = true;
+    user.isFirstLogin = false;
+
+    const accessToken  = generateAccessToken(user._id, user.role);
+    const refreshToken = generateRefreshToken(user._id);
+    user.refreshTokens.push({ token: hashToken(refreshToken) });
+    if (user.refreshTokens.length > 5) user.refreshTokens = user.refreshTokens.slice(-5);
+    user.lastLogin = new Date();
+    await user.save();
+
+    setRefreshTokenCookie(res, refreshToken);
+
+    await AuditLog.create({
+      performedBy: user._id, action: 'ACCOUNT_SETUP_COMPLETED',
+      targetModel: 'User', targetId: user._id,
+      details: { email: user.email }, ipAddress: req.ip,
+    });
+
+    // Fetch org info for the client (same shape as login)
+    let organization = null;
+    if (user.organizationId) {
+      const Organization = require('../models/Organization');
+      const org = await Organization.findById(user.organizationId).select('name subscriptionTier limits');
+      if (org) organization = { id: org._id, name: org.name, subscriptionTier: org.subscriptionTier, limits: org.limits };
+    }
+
+    res.json({
+      success: true,
+      message: 'Account set up successfully. Welcome to TaskBridge!',
+      accessToken,
+      user: user.toJSON(),
+      organization,
+      requirePasswordChange: false,
+    });
+  } catch (error) {
+    console.error('Setup account error:', error);
+    res.status(500).json({ success: false, message: 'Failed to set up account' });
+  }
+};
+
 // GET /api/auth/me
 const getMe = async (req, res) => {
   res.json({ success: true, user: req.user });
@@ -354,4 +434,4 @@ const resetPassword = async (req, res) => {
   }
 };
 
-module.exports = { login, refreshToken, logout, changePassword, getMe, forgotPassword, resetPassword };
+module.exports = { login, refreshToken, logout, changePassword, getMe, setupAccount, forgotPassword, resetPassword };

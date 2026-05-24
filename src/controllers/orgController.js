@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const Organization = require('../models/Organization');
 const User = require('../models/User');
-const Invite = require('../models/Invite');
 const AuditLog = require('../models/AuditLog');
 const { generateAccessToken, generateRefreshToken, setRefreshTokenCookie } = require('../utils/jwt');
 
@@ -108,7 +107,7 @@ const registerOrganization = async (req, res) => {
     org.applyTierLimits();
     await org.save();
 
-    const admin = new User({ name: adminName.trim(), email: adminEmail.toLowerCase().trim(), password: adminPassword, role: 'super_admin', organizationId: org._id, subscriptionTier: 'free', isFirstLogin: false });
+    const admin = new User({ name: adminName.trim(), email: adminEmail.toLowerCase().trim(), password: adminPassword, role: 'super_admin', organizationId: org._id, subscriptionTier: 'free', isRegistered: true, isFirstLogin: false });
     await admin.save();
     org.ownerId = admin._id;
     await org.save();
@@ -120,118 +119,10 @@ const registerOrganization = async (req, res) => {
     setRefreshTokenCookie(res, refreshToken);
 
     await AuditLog.create({ performedBy: admin._id, action: 'ORG_REGISTERED', targetModel: 'Organization', targetId: org._id });
-    res.status(201).json({ success: true, message: 'Organisation registered', accessToken, user: { id: admin._id, name: admin.name, email: admin.email, role: admin.role, organizationId: org._id, subscriptionTier: 'free', isFirstLogin: false }, organization: { id: org._id, name: org.name, joinCode: org.joinCode, subscriptionTier: 'free', limits: org.limits }, requirePasswordChange: false });
+    res.status(201).json({ success: true, message: 'Organisation registered', accessToken, user: { id: admin._id, name: admin.name, email: admin.email, role: admin.role, organizationId: org._id, subscriptionTier: 'free', isFirstLogin: false }, organization: { id: org._id, name: org.name, subscriptionTier: 'free', limits: org.limits }, requirePasswordChange: false });
   } catch (err) {
     console.error('registerOrganization:', err);
     res.status(500).json({ success: false, message: 'Registration failed. Please try again.' });
-  }
-};
-
-// POST /api/org/join  — join code rotates after each use
-const joinOrganization = async (req, res) => {
-  try {
-    const { joinCode } = req.body;
-    if (!joinCode) return res.status(400).json({ success: false, message: 'Join code is required' });
-    const user = await User.findById(req.user._id);
-    if (user.organizationId) return res.status(400).json({ success: false, message: 'You are already part of an organisation' });
-
-    const org = await Organization.findOne({ joinCode: joinCode.toUpperCase().trim(), isActive: true });
-    if (!org) return res.status(404).json({ success: false, message: 'Invalid join code. Check with your administrator.' });
-    if (org.joinCodeExpiresAt && org.joinCodeExpiresAt < new Date())
-      return res.status(410).json({ success: false, message: 'This join code has expired. Ask your admin to regenerate it.' });
-
-    user.organizationId = org._id;
-    user.subscriptionTier = org.subscriptionTier;
-    await user.save();
-
-    // Rotate immediately so nobody else can use it
-    org.rotateJoinCode();
-    await org.save();
-
-    await AuditLog.create({ performedBy: req.user._id, action: 'USER_JOINED_ORG', targetModel: 'Organization', targetId: org._id });
-    res.json({ success: true, message: `You have joined ${org.name}!`, organization: { id: org._id, name: org.name }, newJoinCode: org.joinCode });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to join organisation' });
-  }
-};
-
-// POST /api/org/invite
-const createInvite = async (req, res) => {
-  try {
-    const { email, role = 'employee', expiryHours = 48 } = req.body;
-    if (!email || !EMAIL_RE.test(email)) return res.status(400).json({ success: false, message: 'Valid email is required' });
-    if (!['manager', 'employee'].includes(role)) return res.status(400).json({ success: false, message: 'Invalid invite role' });
-    if (!req.user.organizationId) return res.status(400).json({ success: false, message: 'No organisation found' });
-
-    await Invite.updateMany({ organizationId: req.user.organizationId, email: email.toLowerCase(), status: 'pending' }, { status: 'revoked' });
-
-    const invite = new Invite({ organizationId: req.user.organizationId, createdBy: req.user._id, email: email.toLowerCase().trim(), role, expiresAt: new Date(Date.now() + Math.min(expiryHours, 168) * 3600000) });
-    await invite.save();
-
-    const org = await Organization.findById(req.user.organizationId).select('name');
-    res.status(201).json({ success: true, invite: { id: invite._id, code: invite.code, email: invite.email, role: invite.role, expiresAt: invite.expiresAt }, shareText: `You've been invited to join ${org?.name} on TaskBridge. Code: ${invite.code} (expires ${invite.expiresAt.toLocaleDateString()})` });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to create invite' });
-  }
-};
-
-// POST /api/org/invite/accept
-const acceptInvite = async (req, res) => {
-  try {
-    const { code, name, password } = req.body;
-    if (!code || !name || !password) return res.status(400).json({ success: false, message: 'Code, name, and password required' });
-
-    const invite = await Invite.findByCode(code).populate('organizationId');
-    if (!invite) return res.status(404).json({ success: false, message: 'Invalid invite code' });
-    if (!invite.isValid()) return res.status(410).json({ success: false, message: 'Invite has expired or already been used.' });
-
-    const org = invite.organizationId;
-    if (!org?.isActive) return res.status(404).json({ success: false, message: 'Organisation not found' });
-    if (await User.findOne({ email: invite.email })) return res.status(409).json({ success: false, message: 'Account already exists for this email. Please sign in.' });
-    if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password))
-      return res.status(400).json({ success: false, message: 'Password must be 8+ chars with uppercase, lowercase, and a number' });
-
-    const user = new User({ name: name.trim(), email: invite.email, password, role: invite.role, organizationId: org._id, subscriptionTier: org.subscriptionTier, isFirstLogin: false, createdBy: invite.createdBy });
-    await user.save();
-
-    invite.status = 'accepted';
-    invite.acceptedAt = new Date();
-    invite.acceptedBy = user._id;
-    await invite.save();
-
-    const accessToken = generateAccessToken(user._id, user.role);
-    const refreshToken = generateRefreshToken(user._id);
-    user.refreshTokens.push({ token: hashToken(refreshToken) });
-    await user.save();
-    setRefreshTokenCookie(res, refreshToken);
-
-    res.status(201).json({ success: true, message: `Welcome to ${org.name}!`, accessToken, user: { id: user._id, name: user.name, email: user.email, role: user.role, organizationId: org._id, isFirstLogin: false }, organization: { id: org._id, name: org.name }, requirePasswordChange: false });
-  } catch (err) {
-    console.error('acceptInvite:', err);
-    res.status(500).json({ success: false, message: 'Failed to accept invite' });
-  }
-};
-
-// GET /api/org/invites
-const listInvites = async (req, res) => {
-  try {
-    const invites = await Invite.find({ organizationId: req.user.organizationId }).select('email role status expiresAt createdAt').sort({ createdAt: -1 }).limit(50);
-    res.json({ success: true, invites });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to fetch invites' });
-  }
-};
-
-// DELETE /api/org/invites/:id
-const revokeInvite = async (req, res) => {
-  try {
-    const invite = await Invite.findOne({ _id: req.params.id, organizationId: req.user.organizationId });
-    if (!invite) return res.status(404).json({ success: false, message: 'Invite not found' });
-    invite.status = 'revoked';
-    await invite.save();
-    res.json({ success: true, message: 'Invite revoked' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to revoke invite' });
   }
 };
 
@@ -248,7 +139,7 @@ const getMyOrganization = async (req, res) => {
     ]);
     const usedBytes = org.storage?.usedBytes || 0;
     const limitBytes = org.limits.storageLimitBytes;
-    res.json({ success: true, organization: { id: org._id, name: org.name, joinCode: org.joinCode, joinCodeExpiresAt: org.joinCodeExpiresAt, industry: org.industry, logo: org.logo, subscriptionTier: org.subscriptionTier, subscriptionStatus: org.subscriptionStatus, subscriptionExpiresAt: org.subscriptionExpiresAt, limits: org.limits, storage: { usedBytes, usedFormatted: fmtBytes(usedBytes), limitBytes, limitFormatted: fmtBytes(limitBytes), usedPct: limitBytes > 0 ? Math.min(100, Math.round((usedBytes/limitBytes)*100)) : 0, extraGBPurchased: org.storage?.extraGBPurchased || 0 }, usage: { managers: managerCount, employees: employeeCount } } });
+    res.json({ success: true, organization: { id: org._id, name: org.name, industry: org.industry, logo: org.logo, subscriptionTier: org.subscriptionTier, subscriptionStatus: org.subscriptionStatus, subscriptionExpiresAt: org.subscriptionExpiresAt, limits: org.limits, storage: { usedBytes, usedFormatted: fmtBytes(usedBytes), limitBytes, limitFormatted: fmtBytes(limitBytes), usedPct: limitBytes > 0 ? Math.min(100, Math.round((usedBytes/limitBytes)*100)) : 0, extraGBPurchased: org.storage?.extraGBPurchased || 0 }, usage: { managers: managerCount, employees: employeeCount } } });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to fetch organisation' });
   }
@@ -310,88 +201,7 @@ const cleanStorage = async (req, res) => {
   }
 };
 
-// POST /api/org/joincode/rotate
-const rotateJoinCode = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
-    if (user.role !== 'super_admin') return res.status(403).json({ success: false, message: 'Admins only' });
-    const org = await Organization.findById(user.organizationId);
-    if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
-    org.rotateJoinCode();
-    await org.save();
-    await AuditLog.create({ performedBy: req.user._id, action: 'JOIN_CODE_ROTATED', targetModel: 'Organization', targetId: org._id });
-    res.json({ success: true, message: 'Join code regenerated.', joinCode: org.joinCode, expiresAt: org.joinCodeExpiresAt });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to rotate join code' });
-  }
-};
-
 // GET /api/org/plans  (public)
 const getPlans = (req, res) => res.json({ success: true, plans: PLANS });
 
-// POST /api/org/join-with-code  (public — employee self-registration with join code)
-const joinWithCode = async (req, res) => {
-  try {
-    const { joinCode, name, email, password } = req.body;
-    if (!joinCode || !name || !email || !password)
-      return res.status(400).json({ success: false, message: 'All fields are required' });
-
-    const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$/;
-    if (!EMAIL_REGEX.test(email))
-      return res.status(400).json({ success: false, message: 'Enter a valid email address' });
-    if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password))
-      return res.status(400).json({ success: false, message: 'Password must be 8+ chars with uppercase, lowercase, and a number' });
-
-    if (await User.findOne({ email: email.toLowerCase().trim() }))
-      return res.status(409).json({ success: false, message: 'An account with this email already exists. Try logging in instead.' });
-
-    const org = await Organization.findOne({ joinCode: joinCode.toUpperCase().trim(), isActive: true });
-    if (!org) return res.status(404).json({ success: false, message: 'Invalid join code. Check with your administrator.' });
-    if (org.joinCodeExpiresAt && org.joinCodeExpiresAt < new Date())
-      return res.status(410).json({ success: false, message: 'This join code has expired. Ask your admin to regenerate it.' });
-
-    // Check employee limit
-    const empCount = await User.countDocuments({ organizationId: org._id, role: 'employee', isActive: true });
-    if (empCount >= org.limits.totalEmployees) {
-      return res.status(403).json({ success: false, message: 'This company has reached its employee limit. Contact your administrator.' });
-    }
-
-    const employee = new User({
-      name: name.trim(),
-      email: email.toLowerCase().trim(),
-      password,
-      role: 'employee',
-      organizationId: org._id,
-      subscriptionTier: org.subscriptionTier,
-      isFirstLogin: false,
-    });
-    await employee.save();
-
-    // Rotate join code
-    org.rotateJoinCode();
-    await org.save();
-
-    // Generate tokens
-    const accessToken = generateAccessToken(employee._id, employee.role);
-    const refreshToken = generateRefreshToken(employee._id);
-    employee.refreshTokens.push({ token: hashToken(refreshToken) });
-    await employee.save();
-    setRefreshTokenCookie(res, refreshToken);
-
-    await AuditLog.create({ performedBy: employee._id, action: 'USER_JOINED_VIA_CODE', targetModel: 'Organization', targetId: org._id });
-
-    res.status(201).json({
-      success: true,
-      message: `Welcome to ${org.name}!`,
-      accessToken,
-      user: { id: employee._id, name: employee.name, email: employee.email, role: 'employee', organizationId: org._id, subscriptionTier: org.subscriptionTier, isFirstLogin: false },
-      organization: { id: org._id, name: org.name },
-      requirePasswordChange: false,
-    });
-  } catch (err) {
-    console.error('joinWithCode:', err);
-    res.status(500).json({ success: false, message: 'Failed to join. Please try again.' });
-  }
-};
-
-module.exports = { registerOrganization, joinOrganization, joinWithCode, createInvite, acceptInvite, listInvites, revokeInvite, getMyOrganization, upgradePlan, purchaseExtraStorage, cleanStorage, rotateJoinCode, getPlans };
+module.exports = { registerOrganization, getMyOrganization, upgradePlan, purchaseExtraStorage, cleanStorage, getPlans };

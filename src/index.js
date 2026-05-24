@@ -76,11 +76,11 @@ const strictLimiter = rateLimit({
 app.set('trust proxy', 1);
 app.use('/api/', limiter);
 app.use('/api/auth/login',           authLimiter);
+app.use('/api/auth/setup-account',   strictLimiter);
 app.use('/api/auth/forgot-password', authLimiter);
 app.use('/api/auth/reset-password',  strictLimiter);
 app.use('/api/auth/change-password', strictLimiter);
 app.use('/api/org/register',         registerLimiter);
-app.use('/api/org/invite/accept',    registerLimiter);
 
 // ── Body parsing ───────────────────────────────────────────────────────────
 app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
