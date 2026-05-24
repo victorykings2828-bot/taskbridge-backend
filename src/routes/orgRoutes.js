@@ -2,14 +2,16 @@ const express = require('express');
 const router = express.Router();
 const { authenticate, authorize, requirePasswordChanged } = require('../middleware/auth');
 const {
-  registerOrganization,
+  registerRequestOtp, registerVerify, googleCompleteSignup,
   getMyOrganization, upgradePlan,
   purchaseExtraStorage, cleanStorage,
   getPlans,
 } = require('../controllers/orgController');
 
-// Public — super admin creates a new company/workspace
-router.post('/register',       registerOrganization);
+// Public — super admin creates a new company/workspace (email-verified, 2-step)
+router.post('/register/request-otp', registerRequestOtp);
+router.post('/register/verify',      registerVerify);
+router.post('/register/google',      googleCompleteSignup);
 router.get('/plans',           getPlans);
 
 // Authenticated

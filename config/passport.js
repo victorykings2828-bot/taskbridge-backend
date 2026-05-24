@@ -16,21 +16,20 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
           const email = profile.emails?.[0]?.value?.toLowerCase();
           if (!email) return done(null, false, { message: 'No email from Google' });
 
-          // Only allow login for existing users — no self-registration
           const user = await User.findOne({ email });
+
+          // New Google email → allow signup. Carry the verified identity to the
+          // callback, which will route them to "name your workspace".
           if (!user) {
-            return done(null, false, {
-              message: 'No account found for this Google email. Contact your administrator.',
-            });
+            return done(null, { isNewGoogleUser: true, email, name: profile.displayName || '' });
           }
           if (!user.isActive) {
             return done(null, false, { message: 'Your account has been deactivated.' });
           }
 
-          // Update last login
+          // Existing user → log in
           user.lastLogin = new Date();
           await user.save();
-
           return done(null, user);
         } catch (err) {
           return done(err, null);

@@ -1,10 +1,69 @@
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const Organization = require('../models/Organization');
 const User = require('../models/User');
+const PendingRegistration = require('../models/PendingRegistration');
 const AuditLog = require('../models/AuditLog');
 const { generateAccessToken, generateRefreshToken, setRefreshTokenCookie } = require('../utils/jwt');
+const { sendOtpEmail } = require('../utils/email');
 
 const hashToken = (t) => crypto.createHash('sha256').update(t).digest('hex');
+
+// ── Shared helpers ──────────────────────────────────────────────────────────
+const validateRegistration = ({ companyName, adminName, adminEmail, adminPassword }) => {
+  if (!companyName || !adminName || !adminEmail || !adminPassword) return 'All fields are required';
+  if (!EMAIL_RE.test(adminEmail)) return 'Enter a valid email address';
+  if (adminPassword.length < 8 || !/[A-Z]/.test(adminPassword) || !/[a-z]/.test(adminPassword) || !/\d/.test(adminPassword))
+    return 'Password must be 8+ chars with uppercase, lowercase, and a number';
+  return null;
+};
+
+// Creates the Organization + super_admin user. `password` may be a plaintext
+// string, an already-bcrypt-hashed string, or null (Google signup — no password).
+const createOrganizationWithAdmin = async ({ companyName, industry, adminName, email, password }) => {
+  const org = new Organization({ name: companyName.trim(), industry: (industry || '').trim() });
+  org.applyTierLimits();
+  await org.save();
+
+  const admin = new User({
+    name: adminName.trim(),
+    email: email.toLowerCase().trim(),
+    password: password || null,
+    role: 'super_admin',
+    organizationId: org._id,
+    subscriptionTier: 'free',
+    isRegistered: true,
+    isFirstLogin: false,
+  });
+  await admin.save();
+
+  org.ownerId = admin._id;
+  await org.save();
+
+  await AuditLog.create({ performedBy: admin._id, action: 'ORG_REGISTERED', targetModel: 'Organization', targetId: org._id });
+  return { org, admin };
+};
+
+// Issues access + refresh tokens, stores the hashed refresh token, sets the cookie.
+const issueAuthTokens = async (res, user) => {
+  const accessToken = generateAccessToken(user._id, user.role);
+  const refreshToken = generateRefreshToken(user._id);
+  user.refreshTokens.push({ token: hashToken(refreshToken) });
+  if (user.refreshTokens.length > 5) user.refreshTokens = user.refreshTokens.slice(-5);
+  user.lastLogin = new Date();
+  await user.save();
+  setRefreshTokenCookie(res, refreshToken);
+  return accessToken;
+};
+
+const authPayload = (admin, org, accessToken) => ({
+  success: true,
+  message: `Welcome to TaskBridge, ${admin.name.split(' ')[0]}!`,
+  accessToken,
+  user: { id: admin._id, name: admin.name, email: admin.email, role: admin.role, organizationId: org._id, subscriptionTier: 'free', isFirstLogin: false },
+  organization: { id: org._id, name: org.name, subscriptionTier: 'free', limits: org.limits },
+  requirePasswordChange: false,
+});
 
 const PLANS = [
   {
@@ -90,39 +149,144 @@ const fmtBytes = (b) => {
 
 const EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$/;
 
-// POST /api/org/register
-const registerOrganization = async (req, res) => {
+// POST /api/org/register/request-otp  — step 1 of email signup
+// Validates the details, then emails a 6-digit code. No account is created yet.
+const registerRequestOtp = async (req, res) => {
   try {
     const { companyName, industry, adminName, adminEmail, adminPassword } = req.body;
-    if (!companyName || !adminName || !adminEmail || !adminPassword)
-      return res.status(400).json({ success: false, message: 'All fields are required' });
-    if (!EMAIL_RE.test(adminEmail))
-      return res.status(400).json({ success: false, message: 'Enter a valid email address' });
-    if (await User.findOne({ email: adminEmail.toLowerCase().trim() }))
+
+    const validationError = validateRegistration({ companyName, adminName, adminEmail, adminPassword });
+    if (validationError) return res.status(400).json({ success: false, message: validationError });
+
+    const email = adminEmail.toLowerCase().trim();
+    if (await User.findOne({ email })) {
       return res.status(409).json({ success: false, message: 'An account with this email already exists' });
-    if (adminPassword.length < 8 || !/[A-Z]/.test(adminPassword) || !/[a-z]/.test(adminPassword) || !/\d/.test(adminPassword))
-      return res.status(400).json({ success: false, message: 'Password must be 8+ chars with uppercase, lowercase, and a number' });
+    }
 
-    const org = new Organization({ name: companyName.trim(), industry: (industry||'').trim() });
-    org.applyTierLimits();
-    await org.save();
+    // Generate a 6-digit OTP and store the pending registration (password hashed).
+    const otp = ('' + crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const passwordHash = await bcrypt.hash(adminPassword, 12);
 
-    const admin = new User({ name: adminName.trim(), email: adminEmail.toLowerCase().trim(), password: adminPassword, role: 'super_admin', organizationId: org._id, subscriptionTier: 'free', isRegistered: true, isFirstLogin: false });
-    await admin.save();
-    org.ownerId = admin._id;
-    await org.save();
+    await PendingRegistration.findOneAndUpdate(
+      { email },
+      {
+        email,
+        companyName: companyName.trim(),
+        industry: (industry || '').trim(),
+        adminName: adminName.trim(),
+        passwordHash,
+        otpHash: hashToken(otp),
+        attempts: 0,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
-    const accessToken = generateAccessToken(admin._id, admin.role);
-    const refreshToken = generateRefreshToken(admin._id);
-    admin.refreshTokens.push({ token: hashToken(refreshToken) });
-    await admin.save();
-    setRefreshTokenCookie(res, refreshToken);
+    const result = await sendOtpEmail(email, adminName.trim(), otp);
+    if (!result.success) {
+      // Surface a clear error instead of pretending it sent.
+      return res.status(502).json({ success: false, message: 'Could not send the verification email. Please try again shortly.' });
+    }
 
-    await AuditLog.create({ performedBy: admin._id, action: 'ORG_REGISTERED', targetModel: 'Organization', targetId: org._id });
-    res.status(201).json({ success: true, message: 'Organisation registered', accessToken, user: { id: admin._id, name: admin.name, email: admin.email, role: admin.role, organizationId: org._id, subscriptionTier: 'free', isFirstLogin: false }, organization: { id: org._id, name: org.name, subscriptionTier: 'free', limits: org.limits }, requirePasswordChange: false });
+    // In dev (mock email), log the code so it can be tested without real email.
+    if (process.env.NODE_ENV !== 'production' && !process.env.EMAIL_USER) {
+      console.log(`🔑 Signup OTP for ${email}: ${otp}`);
+    }
+
+    res.json({ success: true, message: `We sent a 6-digit code to ${email}. Enter it to finish signing up.` });
   } catch (err) {
-    console.error('registerOrganization:', err);
+    console.error('registerRequestOtp:', err);
+    res.status(500).json({ success: false, message: 'Could not start registration. Please try again.' });
+  }
+};
+
+// POST /api/org/register/verify  — step 2 of email signup
+// Verifies the OTP, then creates the organization + super admin and logs in.
+const registerVerify = async (req, res) => {
+  try {
+    const { adminEmail, otp } = req.body;
+    if (!adminEmail || !otp) return res.status(400).json({ success: false, message: 'Email and code are required' });
+
+    const email = adminEmail.toLowerCase().trim();
+    const pending = await PendingRegistration.findOne({ email });
+    if (!pending) {
+      return res.status(404).json({ success: false, message: 'No pending signup found. Please start again.' });
+    }
+    if (pending.expiresAt < new Date()) {
+      await PendingRegistration.deleteOne({ _id: pending._id });
+      return res.status(410).json({ success: false, message: 'Your code expired. Please start again.' });
+    }
+    if (pending.attempts >= 5) {
+      await PendingRegistration.deleteOne({ _id: pending._id });
+      return res.status(429).json({ success: false, message: 'Too many incorrect attempts. Please start again.' });
+    }
+    if (hashToken(('' + otp).trim()) !== pending.otpHash) {
+      pending.attempts += 1;
+      await pending.save();
+      return res.status(400).json({ success: false, message: 'Incorrect code. Please check and try again.' });
+    }
+
+    // Guard against a race where the email got registered meanwhile.
+    if (await User.findOne({ email })) {
+      await PendingRegistration.deleteOne({ _id: pending._id });
+      return res.status(409).json({ success: false, message: 'An account with this email already exists' });
+    }
+
+    const { org, admin } = await createOrganizationWithAdmin({
+      companyName: pending.companyName,
+      industry: pending.industry,
+      adminName: pending.adminName,
+      email: pending.email,
+      password: pending.passwordHash, // already a bcrypt hash — stored as-is
+    });
+    await PendingRegistration.deleteOne({ _id: pending._id });
+
+    const accessToken = await issueAuthTokens(res, admin);
+    res.status(201).json(authPayload(admin, org, accessToken));
+  } catch (err) {
+    console.error('registerVerify:', err);
     res.status(500).json({ success: false, message: 'Registration failed. Please try again.' });
+  }
+};
+
+// POST /api/org/register/google  — completes Google signup for a new workspace.
+// Requires a short-lived signup token issued by the Google OAuth callback.
+const googleCompleteSignup = async (req, res) => {
+  try {
+    const jwt = require('jsonwebtoken');
+    const { signupToken, companyName, industry } = req.body;
+    if (!signupToken || !companyName) {
+      return res.status(400).json({ success: false, message: 'Company name is required' });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(signupToken, process.env.JWT_ACCESS_SECRET);
+    } catch {
+      return res.status(401).json({ success: false, message: 'Your signup session expired. Please sign in with Google again.' });
+    }
+    if (decoded.purpose !== 'google_signup' || !decoded.email) {
+      return res.status(400).json({ success: false, message: 'Invalid signup session' });
+    }
+
+    const email = decoded.email.toLowerCase().trim();
+    if (await User.findOne({ email })) {
+      return res.status(409).json({ success: false, message: 'An account with this email already exists. Please sign in.' });
+    }
+
+    const { org, admin } = await createOrganizationWithAdmin({
+      companyName,
+      industry,
+      adminName: decoded.name || email.split('@')[0],
+      email,
+      password: null, // Google accounts sign in via Google (or set a password later)
+    });
+
+    const accessToken = await issueAuthTokens(res, admin);
+    res.status(201).json(authPayload(admin, org, accessToken));
+  } catch (err) {
+    console.error('googleCompleteSignup:', err);
+    res.status(500).json({ success: false, message: 'Could not complete signup. Please try again.' });
   }
 };
 
@@ -204,4 +368,4 @@ const cleanStorage = async (req, res) => {
 // GET /api/org/plans  (public)
 const getPlans = (req, res) => res.json({ success: true, plans: PLANS });
 
-module.exports = { registerOrganization, getMyOrganization, upgradePlan, purchaseExtraStorage, cleanStorage, getPlans };
+module.exports = { registerRequestOtp, registerVerify, googleCompleteSignup, getMyOrganization, upgradePlan, purchaseExtraStorage, cleanStorage, getPlans };

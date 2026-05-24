@@ -30,8 +30,30 @@ router.get('/google',
 router.get('/google/callback',
   passport.authenticate('google', { session: false, failureRedirect: `${process.env.FRONTEND_URL}/login?error=google_failed` }),
   async (req, res) => {
+    const frontendURL = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0];
     try {
       const user = req.user;
+
+      // New Google user (no account yet) → issue a short-lived signup token and
+      // send them to name their workspace before the account is created.
+      if (user?.isNewGoogleUser) {
+        const jwt = require('jsonwebtoken');
+        const signupToken = jwt.sign(
+          { purpose: 'google_signup', email: user.email, name: user.name },
+          process.env.JWT_ACCESS_SECRET,
+          { expiresIn: '15m' }
+        );
+        return res.redirect(`${frontendURL}/register/google?token=${signupToken}`);
+      }
+
+      // Existing user → log in. Google has verified the email, so finish
+      // onboarding for an admin-created account that never set a password
+      // (otherwise it would be stuck on the password-setup / change flow).
+      if (!user.isRegistered || !user.password) {
+        user.isRegistered = true;
+        user.isFirstLogin = false;
+      }
+
       const accessToken  = generateAccessToken(user._id, user.role);
       const newRefreshToken = generateRefreshToken(user._id);
       const hashedRefresh = hashToken(newRefreshToken);
@@ -42,15 +64,12 @@ router.get('/google/callback',
 
       setRefreshTokenCookie(res, newRefreshToken);
 
-      const frontendURL = process.env.FRONTEND_URL || 'http://localhost:3000';
-
       if (user.isFirstLogin) {
-        // Pass token via query param so frontend can store it, then redirect to change-password
         return res.redirect(`${frontendURL}/auth/google/success?token=${accessToken}&requirePasswordChange=true`);
       }
       res.redirect(`${frontendURL}/auth/google/success?token=${accessToken}`);
     } catch (err) {
-      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=google_failed`);
+      res.redirect(`${frontendURL}/login?error=google_failed`);
     }
   }
 );

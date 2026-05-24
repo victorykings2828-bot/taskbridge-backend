@@ -90,6 +90,25 @@ const sendAccountInviteEmail = async (user, loginUrl) => {
   return sendEmail({ to: user.email, subject: 'Set up your TaskBridge account', html });
 };
 
+// 6-digit code emailed during company signup to verify the email is real.
+const sendOtpEmail = async (email, name, otp) => {
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#f8fafc;padding:32px;border-radius:12px;">
+      <div style="text-align:center;margin-bottom:24px;">
+        <div style="display:inline-block;background:#0EA5E9;width:48px;height:48px;border-radius:12px;line-height:48px;color:white;font-size:22px;font-weight:bold;">T</div>
+        <h2 style="color:#0F172A;margin-top:12px;font-size:22px;">Confirm your email</h2>
+      </div>
+      <div style="background:#fff;border-radius:10px;padding:28px;border:1px solid #e2e8f0;text-align:center;">
+        <p style="color:#334155;margin-top:0;">Hi${name ? ' ' + name : ''}, enter this code to finish creating your TaskBridge workspace:</p>
+        <div style="font-size:34px;font-weight:800;letter-spacing:10px;color:#0EA5E9;background:#f0f9ff;border:1px solid #e0f2fe;border-radius:10px;padding:16px;margin:18px 0;">${otp}</div>
+        <p style="color:#94a3b8;font-size:13px;margin-bottom:0;">This code expires in 10 minutes. If you didn't request it, you can ignore this email.</p>
+      </div>
+      <p style="text-align:center;color:#cbd5e1;font-size:11px;margin-top:16px;">TaskBridge</p>
+    </div>
+  `;
+  return sendEmail({ to: email, subject: `Your TaskBridge code: ${otp}`, html });
+};
+
 const sendPasswordChangedEmail = async (user) => {
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -124,4 +143,4 @@ const sendPasswordResetEmail = async (user, resetUrl) => {
   return sendEmail({ to: user.email, subject: 'Reset your TaskBridge password', html });
 };
 
-module.exports = { sendEmail, sendAccountInviteEmail, sendPasswordChangedEmail, sendPasswordResetEmail };
+module.exports = { sendEmail, sendAccountInviteEmail, sendOtpEmail, sendPasswordChangedEmail, sendPasswordResetEmail };

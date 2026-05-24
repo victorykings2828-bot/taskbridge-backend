@@ -99,6 +99,9 @@ const userSchema = new mongoose.Schema(
 // Hash password before saving (skip when password is null — user not set up yet)
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password') || !this.password) return next();
+  // Already a bcrypt hash (e.g. carried over from a verified-registration record)
+  // — don't double-hash.
+  if (/^\$2[aby]\$/.test(this.password)) return next();
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
