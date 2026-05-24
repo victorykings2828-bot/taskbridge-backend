@@ -104,11 +104,22 @@ const createUser = async (req, res) => {
       }
     }
 
-    // No password is set here — the user creates their own via the
-    // setup-account flow on first login. password defaults to null.
+    const emailNorm = email.toLowerCase().trim();
+
+    // If this person already has a SET-UP account in another company, reuse
+    // their existing password so this new workspace works immediately and shows
+    // up in the "Choose a workspace" picker at login. Otherwise the account is
+    // pending until they set a password on first login.
+    const existingRegistered = await User.findOne({
+      email: emailNorm,
+      isRegistered: true,
+      password: { $ne: null },
+    }).select('+password');
+
     const newUser = await User.create({
       name: name.trim(),
-      email: email.toLowerCase().trim(),
+      email: emailNorm,
+      password: existingRegistered ? existingRegistered.password : null, // pre-hashed; pre-save hook passes it through
       role,
       department: department || '',
       phone: phone || '',
@@ -116,19 +127,23 @@ const createUser = async (req, res) => {
       managerId: assignedManagerId,
       organizationId: creator.organizationId,
       subscriptionTier: org.subscriptionTier || 'free',
-      isRegistered: false,
-      isFirstLogin: true,
+      isRegistered: !!existingRegistered,
+      isFirstLogin: !existingRegistered,
     });
 
-    // Invite email pointing the user at the login/setup page — non-blocking.
-    const loginUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0] + '/login';
-    try { await sendAccountInviteEmail(newUser, loginUrl); } catch (e) { console.log('Invite email not sent:', e.message); }
+    // Only send a "set up your account" invite if they actually need to set a password.
+    if (!existingRegistered) {
+      const loginUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0] + '/login';
+      try { await sendAccountInviteEmail(newUser, loginUrl); } catch (e) { console.log('Invite email not sent:', e.message); }
+    }
 
     await Notification.create({
       recipient: newUser._id,
       type: 'account_created',
       title: 'Welcome to TaskBridge',
-      message: `Your account has been created by ${creator.name}. Sign in with your email to set your password.`,
+      message: existingRegistered
+        ? `Your account has been created by ${creator.name}. Sign in with your existing TaskBridge password and pick this workspace.`
+        : `Your account has been created by ${creator.name}. Sign in with your email to set your password.`,
     });
 
     await AuditLog.create({
@@ -142,8 +157,11 @@ const createUser = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: `${role.charAt(0).toUpperCase() + role.slice(1)} created. They can sign in with their email to set a password.`,
+      message: existingRegistered
+        ? `${role.charAt(0).toUpperCase() + role.slice(1)} added. They already have a TaskBridge account — they can sign in with their existing password and pick this workspace.`
+        : `${role.charAt(0).toUpperCase() + role.slice(1)} created. They can sign in with their email to set a password.`,
       user: newUser,
+      existingUser: !!existingRegistered,
     });
   } catch (error) {
     console.error('Create user error:', error);

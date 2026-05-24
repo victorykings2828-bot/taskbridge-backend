@@ -134,12 +134,26 @@ const login = async (req, res) => {
       if (u.password && (await u.comparePassword(password))) matches.push(u);
     }
 
-    if (matches.length === 1) {
-      return issueLoginResponse(req, res, matches[0]);
-    }
+    if (matches.length >= 1) {
+      // The user proved this password. Activate any still-pending accounts for
+      // the same email (e.g. a second company that added them before they ever
+      // set a password) using this same password, so every workspace they've
+      // been added to becomes reachable and appears in the picker.
+      const pendingNoPw = active.filter((u) => !u.password);
+      if (pendingNoPw.length > 0) {
+        const hash = matches[0].password; // bcrypt hash of the proven password
+        await User.updateMany(
+          { _id: { $in: pendingNoPw.map((u) => u._id) } },
+          { password: hash, isRegistered: true, isFirstLogin: false }
+        );
+        for (const u of pendingNoPw) { u.password = hash; matches.push(u); }
+      }
 
-    if (matches.length > 1) {
-      // Same password works for more than one workspace → let the user choose.
+      if (matches.length === 1) {
+        return issueLoginResponse(req, res, matches[0]);
+      }
+
+      // Belongs to multiple workspaces → let the user choose which to enter.
       const ids = matches.map((m) => m._id.toString());
       const selectionToken = jwt.sign({ purpose: 'workspace_select', ids }, process.env.JWT_ACCESS_SECRET, { expiresIn: '10m' });
       const workspaces = await Promise.all(
@@ -339,6 +353,14 @@ const setupAccount = async (req, res) => {
     if (user.refreshTokens.length > 5) user.refreshTokens = user.refreshTokens.slice(-5);
     user.lastLogin = new Date();
     await user.save();
+
+    // Propagate this password to the person's other pending accounts (same email
+    // in other companies) so they can reach all their workspaces with one
+    // password. user.password is now the bcrypt hash; updateMany stores it as-is.
+    await User.updateMany(
+      { email: normEmail, _id: { $ne: user._id }, isRegistered: false },
+      { password: user.password, isRegistered: true, isFirstLogin: false }
+    );
 
     setRefreshTokenCookie(res, refreshToken);
 
