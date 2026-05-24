@@ -1,5 +1,6 @@
 const Feedback = require('../models/Feedback');
 const Task = require('../models/Task');
+const User = require('../models/User');
 const Notification = require('../models/Notification');
 const AuditLog = require('../models/AuditLog');
 
@@ -12,7 +13,7 @@ const giveFeedback = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5' });
     }
 
-    const task = await Task.findById(taskId);
+    const task = await Task.findOne({ _id: taskId, organizationId: req.user.organizationId });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
     if (task.status !== 'completed') {
       return res.status(400).json({ success: false, message: 'Feedback can only be given on completed tasks' });
@@ -91,17 +92,30 @@ const giveFeedback = async (req, res) => {
 const getFeedback = async (req, res) => {
   try {
     const { taskId } = req.query;
-    const query = taskId ? { task: taskId } : {};
+    const orgId = req.user.organizationId;
 
-    // Scope to user's tasks
-    if (req.user.role === 'manager') {
-      const tasks = await Task.find({ assignedBy: req.user._id }).select('_id');
-      const taskIds = tasks.map((t) => t._id);
-      query.task = taskId ? taskId : { $in: taskIds };
-    } else if (req.user.role === 'employee') {
-      query.$or = [{ givenBy: req.user._id }, { givenTo: req.user._id }];
-      if (taskId) query.task = taskId;
+    // A taskId, if given, MUST belong to this organization.
+    if (taskId) {
+      const t = await Task.findOne({ _id: taskId, organizationId: orgId }).select('_id');
+      if (!t) return res.status(404).json({ success: false, message: 'Task not found' });
     }
+
+    // Base scope: only feedback involving members of THIS organization.
+    const orgUserIds = await User.find({ organizationId: orgId }).distinct('_id');
+    const query = { $or: [{ givenTo: { $in: orgUserIds } }, { givenBy: { $in: orgUserIds } }] };
+
+    if (taskId) {
+      query.task = taskId;
+    }
+
+    // Role-narrowing within the org.
+    if (req.user.role === 'manager' && !taskId) {
+      const taskIds = await Task.find({ assignedBy: req.user._id, organizationId: orgId }).distinct('_id');
+      query.$and = [{ $or: [{ task: { $in: taskIds } }, { givenBy: req.user._id }, { givenTo: req.user._id }] }];
+    } else if (req.user.role === 'employee') {
+      query.$and = [{ $or: [{ givenBy: req.user._id }, { givenTo: req.user._id }] }];
+    }
+    // super_admin: sees all feedback within the organization (base scope only)
 
     const feedbacks = await Feedback.find(query)
       .populate('givenBy', 'name email role')

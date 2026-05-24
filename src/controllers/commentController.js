@@ -9,7 +9,7 @@ const getComments = async (req, res) => {
     const { taskId } = req.params;
 
     // Verify task exists and user has access
-    const task = await Task.findById(taskId);
+    const task = await Task.findOne({ _id: taskId, organizationId: req.user.organizationId });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     if (req.user.role === 'employee' && task.assignedTo.toString() !== req.user._id.toString()) {
@@ -36,7 +36,7 @@ const addComment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Comment cannot be empty' });
     }
 
-    const task = await Task.findById(taskId);
+    const task = await Task.findOne({ _id: taskId, organizationId: req.user.organizationId });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     // Access: only manager who assigned OR employee it's assigned to
