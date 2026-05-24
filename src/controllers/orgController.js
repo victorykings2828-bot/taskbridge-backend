@@ -159,9 +159,9 @@ const registerRequestOtp = async (req, res) => {
     if (validationError) return res.status(400).json({ success: false, message: validationError });
 
     const email = adminEmail.toLowerCase().trim();
-    if (await User.findOne({ email })) {
-      return res.status(409).json({ success: false, message: 'An account with this email already exists' });
-    }
+    // NOTE: we intentionally do NOT block emails that already exist in other
+    // companies — the same person can own/join multiple workspaces. Email is
+    // unique per organization, enforced at creation time.
 
     // Generate a 6-digit OTP and store the pending registration (password hashed).
     const otp = ('' + crypto.randomInt(0, 1000000)).padStart(6, '0');
@@ -229,12 +229,6 @@ const registerVerify = async (req, res) => {
       pending.attempts += 1;
       await pending.save();
       return res.status(400).json({ success: false, message: 'Incorrect code. Please check and try again.' });
-    }
-
-    // Guard against a race where the email got registered meanwhile.
-    if (await User.findOne({ email })) {
-      await PendingRegistration.deleteOne({ _id: pending._id });
-      return res.status(409).json({ success: false, message: 'An account with this email already exists' });
     }
 
     const { org, admin } = await createOrganizationWithAdmin({

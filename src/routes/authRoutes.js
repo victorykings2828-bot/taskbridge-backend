@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const passport = require('../../config/passport');
-const { login, refreshToken, logout, changePassword, getMe, setupAccount, forgotPassword, resetPassword } = require('../controllers/authController');
+const { login, refreshToken, logout, changePassword, getMe, setupAccount, selectWorkspace, forgotPassword, resetPassword } = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 const {
   generateAccessToken,
@@ -14,6 +14,7 @@ const {
 const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
 
 router.post('/login', login);
+router.post('/select-workspace', selectWorkspace);
 router.post('/setup-account', setupAccount);
 router.post('/refresh', refreshToken);
 router.post('/logout', logout);

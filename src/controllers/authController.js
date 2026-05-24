@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const {
@@ -24,6 +25,40 @@ const validatePasswordComplexity = (password) => {
 const hashToken = (token) =>
   crypto.createHash('sha256').update(token).digest('hex');
 
+// Build the organization summary returned to the client.
+const buildOrg = async (organizationId) => {
+  if (!organizationId) return null;
+  const Organization = require('../models/Organization');
+  const org = await Organization.findById(organizationId).select('name subscriptionTier limits');
+  return org ? { id: org._id, name: org.name, subscriptionTier: org.subscriptionTier, limits: org.limits } : null;
+};
+
+// Issue tokens for a verified user and send the standard auth response.
+const issueLoginResponse = async (req, res, user) => {
+  user.loginAttempts = 0;
+  user.lockUntil = null;
+  const accessToken  = generateAccessToken(user._id, user.role);
+  const refreshToken = generateRefreshToken(user._id);
+  user.refreshTokens.push({ token: hashToken(refreshToken) });
+  if (user.refreshTokens.length > 5) user.refreshTokens = user.refreshTokens.slice(-5);
+  user.lastLogin = new Date();
+  await user.save();
+  setRefreshTokenCookie(res, refreshToken);
+  await AuditLog.create({
+    performedBy: user._id, action: 'USER_LOGIN',
+    targetModel: 'User', targetId: user._id,
+    details: { email: user.email }, ipAddress: req.ip,
+  });
+  return res.json({
+    success: true,
+    message: 'Login successful',
+    accessToken,
+    user: user.toJSON(),
+    organization: await buildOrg(user.organizationId),
+    requirePasswordChange: user.isFirstLogin,
+  });
+};
+
 // POST /api/auth/login
 const login = async (req, res) => {
   try {
@@ -43,95 +78,86 @@ const login = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid credentials' });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password +loginAttempts +lockUntil');
-    
-    // Always run bcrypt even if user not found (prevent timing attacks)
+    const normEmail = email.toLowerCase().trim();
     const dummyHash = '$2a$12$dummyhashtopreventtimingattacksonnonexistentemails.xxx';
-    
-    if (!user) {
+
+    // The same email may exist in multiple organizations (one account each).
+    const accounts = await User.find({ email: normEmail }).select('+password +loginAttempts +lockUntil');
+
+    if (accounts.length === 0) {
       await require('bcryptjs').compare(password, dummyHash).catch(() => {});
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    // Check account lock
-    if (user.lockUntil && user.lockUntil > Date.now()) {
-      const minutesLeft = Math.ceil((user.lockUntil - Date.now()) / 60000);
-      return res.status(429).json({
-        success: false,
-        message: `Account locked due to too many failed attempts. Try again in ${minutesLeft} minute${minutesLeft > 1 ? 's' : ''}.`,
-      });
+    // ── Single account (the overwhelmingly common case) — original logic ──────
+    if (accounts.length === 1) {
+      const user = accounts[0];
+
+      if (user.lockUntil && user.lockUntil > Date.now()) {
+        const minutesLeft = Math.ceil((user.lockUntil - Date.now()) / 60000);
+        return res.status(429).json({ success: false, message: `Account locked due to too many failed attempts. Try again in ${minutesLeft} minute${minutesLeft > 1 ? 's' : ''}.` });
+      }
+      if (!user.isActive) {
+        return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact your administrator.' });
+      }
+      // Created by an admin but password not set yet → go to setup.
+      if (!user.password) {
+        return res.json({ success: true, setupRequired: true, email: user.email });
+      }
+
+      const isMatch = await user.comparePassword(password);
+      if (!isMatch) {
+        user.loginAttempts = (user.loginAttempts || 0) + 1;
+        if (user.loginAttempts >= 5) {
+          user.lockUntil = new Date(Date.now() + 15 * 60 * 1000);
+          user.loginAttempts = 0;
+          await user.save();
+          await AuditLog.create({ performedBy: user._id, action: 'ACCOUNT_LOCKED', targetModel: 'User', targetId: user._id, details: { reason: 'Too many failed login attempts' }, ipAddress: req.ip });
+          return res.status(429).json({ success: false, message: 'Too many failed attempts. Account locked for 15 minutes.' });
+        }
+        await user.save();
+        return res.status(401).json({ success: false, message: 'Invalid email or password' });
+      }
+      return issueLoginResponse(req, res, user);
     }
 
-    if (!user.isActive) {
+    // ── Multiple accounts share this email (member of multiple workspaces) ────
+    const active = accounts.filter((u) => u.isActive);
+    if (active.length === 0) {
+      await require('bcryptjs').compare(password, dummyHash).catch(() => {});
       return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact your administrator.' });
     }
 
-    // Account created by an admin but password not yet set → require setup.
-    // Password presence is the real signal (any account that already has a
-    // password — including legacy ones — logs in normally). We respond 200 with
-    // setupRequired so the frontend can redirect to the setup-account page.
-    if (!user.password) {
-      return res.json({ success: true, setupRequired: true, email: user.email });
+    // Match the password against each account that has one set.
+    const matches = [];
+    for (const u of active) {
+      if (u.password && (await u.comparePassword(password))) matches.push(u);
     }
 
-    const isMatch = await user.comparePassword(password);
-
-    if (!isMatch) {
-      // Increment failed attempts
-      user.loginAttempts = (user.loginAttempts || 0) + 1;
-      if (user.loginAttempts >= 5) {
-        user.lockUntil = new Date(Date.now() + 15 * 60 * 1000); // Lock 15 min
-        user.loginAttempts = 0;
-        await user.save();
-        await AuditLog.create({
-          performedBy: user._id, action: 'ACCOUNT_LOCKED',
-          targetModel: 'User', targetId: user._id,
-          details: { reason: 'Too many failed login attempts' }, ipAddress: req.ip,
-        });
-        return res.status(429).json({ success: false, message: 'Too many failed attempts. Account locked for 15 minutes.' });
-      }
-      await user.save();
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    if (matches.length === 1) {
+      return issueLoginResponse(req, res, matches[0]);
     }
 
-    // Successful login — reset lockout
-    user.loginAttempts = 0;
-    user.lockUntil = null;
-
-    const accessToken  = generateAccessToken(user._id, user.role);
-    const refreshToken = generateRefreshToken(user._id);
-    const hashedRefresh = hashToken(refreshToken);
-
-    // Store HASHED refresh token
-    user.refreshTokens.push({ token: hashedRefresh });
-    if (user.refreshTokens.length > 5) user.refreshTokens = user.refreshTokens.slice(-5);
-    user.lastLogin = new Date();
-    await user.save();
-
-    setRefreshTokenCookie(res, refreshToken);
-
-    await AuditLog.create({
-      performedBy: user._id, action: 'USER_LOGIN',
-      targetModel: 'User', targetId: user._id,
-      details: { email: user.email }, ipAddress: req.ip,
-    });
-
-    // Fetch org info if user belongs to one
-    let organization = null;
-    if (user.organizationId) {
-      const Organization = require('../models/Organization');
-      const org = await Organization.findById(user.organizationId).select('name subscriptionTier limits');
-      if (org) organization = { id: org._id, name: org.name, subscriptionTier: org.subscriptionTier, limits: org.limits };
+    if (matches.length > 1) {
+      // Same password works for more than one workspace → let the user choose.
+      const ids = matches.map((m) => m._id.toString());
+      const selectionToken = jwt.sign({ purpose: 'workspace_select', ids }, process.env.JWT_ACCESS_SECRET, { expiresIn: '10m' });
+      const workspaces = await Promise.all(
+        matches.map(async (m) => ({ userId: m._id, role: m.role, organization: await buildOrg(m.organizationId) }))
+      );
+      return res.json({
+        success: true,
+        chooseWorkspace: true,
+        selectionToken,
+        workspaces: workspaces.map((w) => ({ userId: w.userId, role: w.role, name: w.organization?.name || 'Workspace' })),
+      });
     }
 
-    res.json({
-      success: true,
-      message: 'Login successful',
-      accessToken,
-      user: user.toJSON(),
-      organization,
-      requirePasswordChange: user.isFirstLogin,
-    });
+    // No password matched. If an account is still pending setup, send to setup.
+    if (active.some((u) => !u.password)) {
+      return res.json({ success: true, setupRequired: true, email: normEmail });
+    }
+    return res.status(401).json({ success: false, message: 'Invalid email or password' });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ success: false, message: 'Server error during login' });
@@ -285,18 +311,21 @@ const setupAccount = async (req, res) => {
       return res.status(400).json({ success: false, message: complexityError });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
+    const normEmail = email.toLowerCase().trim();
+    // Target the account that still needs setup (an email can also have a fully
+    // set-up account in a different organization — we never touch that one).
+    const user = await User.findOne({ email: normEmail, isRegistered: false }).select('+password');
 
-    // No account → not invited. (Setup is invite-only; we never create accounts here.)
     if (!user) {
+      // Either not invited anywhere, or every account for this email is already set up.
+      const anyAccount = await User.findOne({ email: normEmail });
+      if (anyAccount) {
+        return res.status(409).json({ success: false, message: 'Account already set up. Please sign in instead.' });
+      }
       return res.status(404).json({ success: false, message: 'You are not invited to this company. Contact your administrator.' });
     }
     if (!user.isActive) {
       return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact your administrator.' });
-    }
-    // Already set up → must use normal login / forgot-password instead.
-    if (user.password && user.isRegistered) {
-      return res.status(409).json({ success: false, message: 'Account already set up. Please sign in instead.' });
     }
 
     // Set the password (hashed by pre-save hook) and mark as registered.
@@ -338,6 +367,34 @@ const setupAccount = async (req, res) => {
   } catch (error) {
     console.error('Setup account error:', error);
     res.status(500).json({ success: false, message: 'Failed to set up account' });
+  }
+};
+
+// POST /api/auth/select-workspace
+// Completes login when one email+password matched multiple workspaces.
+const selectWorkspace = async (req, res) => {
+  try {
+    const { selectionToken, userId } = req.body;
+    if (!selectionToken || !userId) {
+      return res.status(400).json({ success: false, message: 'Workspace selection is required' });
+    }
+    let decoded;
+    try {
+      decoded = jwt.verify(selectionToken, process.env.JWT_ACCESS_SECRET);
+    } catch {
+      return res.status(401).json({ success: false, message: 'Selection expired. Please sign in again.' });
+    }
+    if (decoded.purpose !== 'workspace_select' || !Array.isArray(decoded.ids) || !decoded.ids.includes(String(userId))) {
+      return res.status(400).json({ success: false, message: 'Invalid workspace selection' });
+    }
+    const user = await User.findById(userId);
+    if (!user || !user.isActive) {
+      return res.status(401).json({ success: false, message: 'Account not available' });
+    }
+    return issueLoginResponse(req, res, user);
+  } catch (error) {
+    console.error('Select workspace error:', error);
+    res.status(500).json({ success: false, message: 'Failed to select workspace' });
   }
 };
 
@@ -434,4 +491,4 @@ const resetPassword = async (req, res) => {
   }
 };
 
-module.exports = { login, refreshToken, logout, changePassword, getMe, setupAccount, forgotPassword, resetPassword };
+module.exports = { login, refreshToken, logout, changePassword, getMe, setupAccount, selectWorkspace, forgotPassword, resetPassword };

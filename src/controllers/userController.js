@@ -65,9 +65,14 @@ const createUser = async (req, res) => {
       }
     }
 
-    const existing = await User.findOne({ email: email.toLowerCase().trim() });
+    // Only block if this email is already in THIS organization. The same person
+    // (email) may belong to other companies — that's allowed.
+    const existing = await User.findOne({
+      email: email.toLowerCase().trim(),
+      organizationId: creator.organizationId,
+    });
     if (existing) {
-      return res.status(409).json({ success: false, message: 'An account with this email already exists' });
+      return res.status(409).json({ success: false, message: 'This email is already a member of your organization' });
     }
 
     // Determine managerId

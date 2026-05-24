@@ -12,7 +12,6 @@ const userSchema = new mongoose.Schema(
     email: {
       type: String,
       required: [true, 'Email is required'],
-      unique: true,
       lowercase: true,
       trim: true,
       match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email'],
@@ -119,5 +118,13 @@ userSchema.methods.toJSON = function () {
   delete obj.refreshTokens;
   return obj;
 };
+
+// Email is unique PER organization (not globally) — the same person can belong
+// to more than one company. organizationId is null only transiently, so the
+// partial filter keeps the index valid for real members.
+userSchema.index(
+  { email: 1, organizationId: 1 },
+  { unique: true, partialFilterExpression: { organizationId: { $type: 'objectId' } } }
+);
 
 module.exports = mongoose.model('User', userSchema);
