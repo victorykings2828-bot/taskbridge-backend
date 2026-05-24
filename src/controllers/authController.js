@@ -9,7 +9,7 @@ const {
   setRefreshTokenCookie,
   clearRefreshTokenCookie,
 } = require('../utils/jwt');
-const { sendPasswordChangedEmail, sendPasswordResetEmail } = require('../utils/email');
+const { sendPasswordChangedEmail, sendPasswordResetEmail, sendOtpEmail } = require('../utils/email');
 
 // ── Password complexity validator ──────────────────────────────────────────
 const validatePasswordComplexity = (password) => {
@@ -128,6 +128,14 @@ const login = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact your administrator.' });
     }
 
+    // Registered (password-set) accounts for this email, and whether they're all locked.
+    const registered = active.filter((u) => u.password);
+    if (registered.length > 0 && registered.every((u) => u.lockUntil && u.lockUntil > Date.now())) {
+      const soonest = Math.min(...registered.map((u) => u.lockUntil.getTime()));
+      const minutesLeft = Math.ceil((soonest - Date.now()) / 60000);
+      return res.status(429).json({ success: false, message: `Account locked due to too many failed attempts. Try again in ${minutesLeft} minute${minutesLeft > 1 ? 's' : ''}.` });
+    }
+
     // Match the password against each account that has one set.
     const matches = [];
     for (const u of active) {
@@ -167,9 +175,17 @@ const login = async (req, res) => {
       });
     }
 
-    // No password matched. If an account is still pending setup, send to setup.
-    if (active.some((u) => !u.password)) {
+    // No password matched.
+    // Only route to setup when there is NO registered account (all pending) —
+    // a wrong password against an existing account must NOT leak into setup.
+    if (registered.length === 0) {
       return res.json({ success: true, setupRequired: true, email: normEmail });
+    }
+    // Wrong password against existing account(s): count the failed attempt and lock.
+    for (const u of registered) {
+      u.loginAttempts = (u.loginAttempts || 0) + 1;
+      if (u.loginAttempts >= 5) { u.lockUntil = new Date(Date.now() + 15 * 60 * 1000); u.loginAttempts = 0; }
+      await u.save();
     }
     return res.status(401).json({ success: false, message: 'Invalid email or password' });
   } catch (error) {
@@ -309,15 +325,51 @@ const changePassword = async (req, res) => {
   }
 };
 
+// POST /api/auth/setup-account/request-otp
+// Emails a 6-digit code to a pending (invited) account. Proves the person owns
+// the email before they can set a password — prevents claiming someone's account.
+const requestSetupOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
+    const normEmail = email.toLowerCase().trim();
+
+    // Generic response so we don't reveal which emails have a pending invite.
+    const GENERIC = { success: true, message: 'If this email has a pending invitation, a code has been sent.' };
+
+    const pending = await User.find({ email: normEmail, isRegistered: false, isActive: true });
+    if (pending.length === 0) return res.json(GENERIC);
+
+    const otp = ('' + crypto.randomInt(0, 1000000)).padStart(6, '0');
+    await User.updateMany(
+      { email: normEmail, isRegistered: false, isActive: true },
+      { setupOtpHash: hashToken(otp), setupOtpExpires: new Date(Date.now() + 10 * 60 * 1000) }
+    );
+
+    if (process.env.NODE_ENV !== 'production' && !process.env.BREVO_API_KEY && !process.env.EMAIL_USER) {
+      console.log(`🔑 Setup OTP for ${normEmail}: ${otp}`);
+    }
+
+    const result = await sendOtpEmail(normEmail, pending[0].name, otp);
+    if (!result.success) {
+      return res.status(502).json({ success: false, message: 'Could not send the verification code. Please try again shortly.', emailErrorCode: result.code });
+    }
+    return res.json(GENERIC);
+  } catch (error) {
+    console.error('requestSetupOtp:', error);
+    res.status(500).json({ success: false, message: 'Failed to send code' });
+  }
+};
+
 // POST /api/auth/setup-account
-// First-time password creation for accounts created by an admin.
-// Only works if the email exists AND has not been set up yet — no random signup.
+// First-time password creation for an admin-created account. Requires a valid
+// emailed OTP (proof of email ownership) — no random signup, no account claiming.
 const setupAccount = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, otp } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email and password are required' });
+    if (!email || !password || !otp) {
+      return res.status(400).json({ success: false, message: 'Email, verification code, and password are required' });
     }
 
     const complexityError = validatePasswordComplexity(password);
@@ -328,7 +380,8 @@ const setupAccount = async (req, res) => {
     const normEmail = email.toLowerCase().trim();
     // Target the account that still needs setup (an email can also have a fully
     // set-up account in a different organization — we never touch that one).
-    const user = await User.findOne({ email: normEmail, isRegistered: false }).select('+password');
+    const user = await User.findOne({ email: normEmail, isRegistered: false })
+      .select('+password +setupOtpHash +setupOtpExpires');
 
     if (!user) {
       // Either not invited anywhere, or every account for this email is already set up.
@@ -342,10 +395,20 @@ const setupAccount = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Your account has been deactivated. Contact your administrator.' });
     }
 
+    // Verify the emailed OTP — proves the person owns this email.
+    if (!user.setupOtpHash || !user.setupOtpExpires || user.setupOtpExpires < new Date()) {
+      return res.status(400).json({ success: false, message: 'Your code has expired. Please request a new one.' });
+    }
+    if (hashToken(('' + otp).trim()) !== user.setupOtpHash) {
+      return res.status(400).json({ success: false, message: 'Incorrect code. Please check and try again.' });
+    }
+
     // Set the password (hashed by pre-save hook) and mark as registered.
     user.password = password;
     user.isRegistered = true;
     user.isFirstLogin = false;
+    user.setupOtpHash = null;
+    user.setupOtpExpires = null;
 
     const accessToken  = generateAccessToken(user._id, user.role);
     const refreshToken = generateRefreshToken(user._id);
@@ -359,7 +422,7 @@ const setupAccount = async (req, res) => {
     // password. user.password is now the bcrypt hash; updateMany stores it as-is.
     await User.updateMany(
       { email: normEmail, _id: { $ne: user._id }, isRegistered: false },
-      { password: user.password, isRegistered: true, isFirstLogin: false }
+      { password: user.password, isRegistered: true, isFirstLogin: false, setupOtpHash: null, setupOtpExpires: null }
     );
 
     setRefreshTokenCookie(res, refreshToken);
@@ -434,32 +497,33 @@ const forgotPassword = async (req, res) => {
     // Always respond with the same message to prevent email enumeration
     const SAFE_MSG = 'If that email is registered, a reset link has been sent.';
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() })
-      .select('+passwordResetToken +passwordResetExpires');
-
-    if (!user || !user.isActive) {
+    const normEmail = email.toLowerCase().trim();
+    // The same email may have a registered account in multiple companies — issue
+    // one reset token across all of them so the reset works regardless of which
+    // workspace they meant.
+    const users = await User.find({ email: normEmail, isActive: true, password: { $ne: null } });
+    if (users.length === 0) {
       return res.json({ success: true, message: SAFE_MSG });
     }
 
-    // Generate a crypto-random 32-byte token
-    const rawToken  = crypto.randomBytes(32).toString('hex');
-    const hashToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const rawToken   = crypto.randomBytes(32).toString('hex');
+    const tokenHash  = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-    user.passwordResetToken   = hashToken;
-    user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-    await user.save();
+    await User.updateMany(
+      { email: normEmail, isActive: true, password: { $ne: null } },
+      { passwordResetToken: tokenHash, passwordResetExpires: new Date(Date.now() + 60 * 60 * 1000) }
+    );
 
     const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0];
     const resetUrl    = `${frontendUrl}/reset-password/${rawToken}`;
 
-    await sendPasswordResetEmail(user, resetUrl);
+    await sendPasswordResetEmail(users[0], resetUrl);
 
-    // In dev, log the reset URL so you can test without email
     if (process.env.NODE_ENV !== 'production') {
       console.log(`🔑 Password reset URL (dev): ${resetUrl}`);
     }
 
-    await AuditLog.create({ performedBy: user._id, action: 'PASSWORD_RESET_REQUESTED', targetModel: 'User', targetId: user._id, ipAddress: req.ip });
+    await AuditLog.create({ performedBy: users[0]._id, action: 'PASSWORD_RESET_REQUESTED', targetModel: 'User', targetId: users[0]._id, ipAddress: req.ip });
 
     res.json({ success: true, message: SAFE_MSG });
   } catch (error) {
@@ -483,28 +547,31 @@ const resetPassword = async (req, res) => {
     // Hash the raw token to compare against stored hash
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
-    const user = await User.findOne({
+    // A single reset token may be set on several accounts (same email, multiple
+    // companies) — update them all so the new password works everywhere.
+    const users = await User.find({
       passwordResetToken:   hashedToken,
       passwordResetExpires: { $gt: Date.now() },
     }).select('+password +passwordResetToken +passwordResetExpires +loginAttempts +lockUntil');
 
-    if (!user) {
+    if (users.length === 0) {
       return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired. Please request a new one.' });
     }
 
-    // Update password + clear reset fields + clear lockout
-    user.password             = password;
-    user.passwordResetToken   = null;
-    user.passwordResetExpires = null;
-    user.loginAttempts        = 0;
-    user.lockUntil            = null;
-    user.isFirstLogin         = false;
-    // Invalidate all refresh tokens (security: force re-login on all devices)
-    user.refreshTokens        = [];
-    await user.save();
+    for (const user of users) {
+      user.password             = password;
+      user.passwordResetToken   = null;
+      user.passwordResetExpires = null;
+      user.loginAttempts        = 0;
+      user.lockUntil            = null;
+      user.isFirstLogin         = false;
+      user.isRegistered         = true;
+      user.refreshTokens        = []; // force re-login on all devices
+      await user.save();
+    }
 
-    await sendPasswordChangedEmail(user);
-    await AuditLog.create({ performedBy: user._id, action: 'PASSWORD_RESET_COMPLETED', targetModel: 'User', targetId: user._id, ipAddress: req.ip });
+    await sendPasswordChangedEmail(users[0]);
+    await AuditLog.create({ performedBy: users[0]._id, action: 'PASSWORD_RESET_COMPLETED', targetModel: 'User', targetId: users[0]._id, ipAddress: req.ip });
 
     res.json({ success: true, message: 'Password reset successful. You can now sign in with your new password.' });
   } catch (error) {
@@ -513,4 +580,4 @@ const resetPassword = async (req, res) => {
   }
 };
 
-module.exports = { login, refreshToken, logout, changePassword, getMe, setupAccount, selectWorkspace, forgotPassword, resetPassword };
+module.exports = { login, refreshToken, logout, changePassword, getMe, requestSetupOtp, setupAccount, selectWorkspace, forgotPassword, resetPassword };

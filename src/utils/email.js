@@ -43,6 +43,11 @@ const senderAddress = () =>
 
 // Send via Brevo's HTTP API (port 443 — never blocked by Render's free tier).
 const sendViaBrevo = async ({ to, subject, html }) => {
+  if (typeof fetch !== 'function') {
+    const err = new Error('global fetch is unavailable — Node 18+ is required for Brevo email');
+    err.code = 'NO_FETCH';
+    throw err;
+  }
   const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {

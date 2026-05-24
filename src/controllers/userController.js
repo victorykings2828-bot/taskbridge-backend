@@ -164,8 +164,12 @@ const createUser = async (req, res) => {
       existingUser: !!existingRegistered,
     });
   } catch (error) {
+    // Unique-index race: another concurrent request created the same email+org.
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, message: 'This email is already a member of your organization' });
+    }
     console.error('Create user error:', error);
-    res.status(500).json({ success: false, message: 'Failed to create user: ' + error.message });
+    res.status(500).json({ success: false, message: 'Failed to create user' });
   }
 };
 

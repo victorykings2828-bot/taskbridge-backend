@@ -91,6 +91,10 @@ const userSchema = new mongoose.Schema(
     // ── Password reset ─────────────────────────────────────────────────────
     passwordResetToken:   { type: String, default: null, select: false },
     passwordResetExpires: { type: Date,   default: null, select: false },
+
+    // ── Account-setup email verification (proves the invitee owns the email) ──
+    setupOtpHash:    { type: String, default: null, select: false },
+    setupOtpExpires: { type: Date,   default: null, select: false },
   },
   { timestamps: true }
 );
