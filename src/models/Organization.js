@@ -91,11 +91,6 @@ organizationSchema.methods.applyTierLimits = function () {
   this.limits = { ...base, storageLimitBytes: base.storageLimitBytes + extraBytes };
 };
 
-organizationSchema.methods.rotateJoinCode = function () {
-  this.joinCode          = _genCode();
-  this.joinCodeUsedAt    = new Date();
-  this.joinCodeExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-};
 
 organizationSchema.methods.storageAvailableBytes = function () {
   return Math.max(0, this.limits.storageLimitBytes - (this.storage?.usedBytes || 0));

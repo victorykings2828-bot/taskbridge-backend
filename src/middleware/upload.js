@@ -33,11 +33,14 @@ const ALLOWED_MIME = new Set([
 ]);
 
 const ALLOWED_EXT = new Set([
-  '.jpg', '.jpeg', '.png', '.webp', '.pdf',
-  '.doc', '.docx', '.xls', '.xlsx', '.txt', '.zip',
+  '.jpg', '.jpeg', '.png', '.webp', '.gif',
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.txt', '.csv', '.json', '.md',
+  '.zip', '.py',
 ]);
 
-const BLOCKED_EXT = ['.exe', '.sh', '.bat', '.cmd', '.ps1', '.js', '.php', '.py', '.rb', '.pl'];
+// Genuinely dangerous executables/installers stay blocked.
+const BLOCKED_EXT = ['.exe', '.msi', '.bat', '.cmd', '.sh', '.ps1', '.scr', '.com', '.dll', '.php', '.jar'];
 
 // ── Sanitize filename ────────────────────────────────────────────────────────
 const sanitizeFilename = (original) => {
@@ -58,16 +61,16 @@ const upload = multer({
     fields: 10,
   },
   fileFilter: (_req, file, cb) => {
+    // Validate by extension, not MIME: the browser/OS reports unreliable MIME
+    // types for zip (application/octet-stream) and code files, which previously
+    // caused valid uploads to be rejected. Files are only stored & downloaded,
+    // never executed server-side, so an extension allow/block list is sufficient.
     const ext = path.extname(file.originalname).toLowerCase();
-
-    if (!ALLOWED_MIME.has(file.mimetype)) {
-      return cb(new Error('File type not allowed'));
+    if (BLOCKED_EXT.includes(ext)) {
+      return cb(new Error('Executable file types are not allowed for security reasons'));
     }
     if (!ALLOWED_EXT.has(ext)) {
-      return cb(new Error('File type not allowed'));
-    }
-    if (BLOCKED_EXT.some((b) => file.originalname.toLowerCase().includes(b))) {
-      return cb(new Error('File type not allowed'));
+      return cb(new Error(`Unsupported file type "${ext || 'unknown'}". Allowed: images, PDF, Office docs, txt/csv/json, zip, py.`));
     }
     cb(null, true);
   },

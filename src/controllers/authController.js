@@ -120,8 +120,8 @@ const login = async (req, res) => {
     let organization = null;
     if (user.organizationId) {
       const Organization = require('../models/Organization');
-      const org = await Organization.findById(user.organizationId).select('name joinCode subscriptionTier limits');
-      if (org) organization = { id: org._id, name: org.name, joinCode: org.joinCode, subscriptionTier: org.subscriptionTier, limits: org.limits };
+      const org = await Organization.findById(user.organizationId).select('name subscriptionTier limits');
+      if (org) organization = { id: org._id, name: org.name, subscriptionTier: org.subscriptionTier, limits: org.limits };
     }
 
     res.json({
