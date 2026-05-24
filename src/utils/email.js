@@ -36,9 +36,14 @@ const createTransporter = () => {
 
 const sendEmail = async ({ to, subject, html, text }) => {
   const transporter = createTransporter();
+  // Gmail rejects/rewrites a From that isn't the authenticated account, so when
+  // real credentials are set we always send From the EMAIL_USER address.
+  const fromAddress = process.env.EMAIL_USER
+    ? `TaskBridge <${process.env.EMAIL_USER}>`
+    : (process.env.EMAIL_FROM || 'TaskBridge <noreply@taskbridge.io>');
   try {
     const info = await transporter.sendMail({
-      from: process.env.EMAIL_FROM || `TaskBridge <${process.env.EMAIL_USER || 'noreply@taskbridge.io'}>`,
+      from: fromAddress,
       to,
       subject,
       html,

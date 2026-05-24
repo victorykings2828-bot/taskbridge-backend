@@ -185,7 +185,12 @@ const registerRequestOtp = async (req, res) => {
     const result = await sendOtpEmail(email, adminName.trim(), otp);
     if (!result.success) {
       // Surface a clear error instead of pretending it sent.
-      return res.status(502).json({ success: false, message: 'Could not send the verification email. Please try again shortly.' });
+      // `emailErrorCode` is a non-sensitive diagnostic (e.g. EAUTH, ETIMEDOUT).
+      return res.status(502).json({
+        success: false,
+        message: 'Could not send the verification email. Please try again shortly.',
+        emailErrorCode: result.code || 'UNKNOWN',
+      });
     }
 
     // In dev (mock email), log the code so it can be tested without real email.
