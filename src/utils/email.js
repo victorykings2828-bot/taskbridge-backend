@@ -34,36 +34,74 @@ const createTransporter = () => {
   };
 };
 
-const sendEmail = async ({ to, subject, html, text }) => {
-  const transporter = createTransporter();
-  // Gmail rejects/rewrites a From that isn't the authenticated account, so when
-  // real credentials are set we always send From the EMAIL_USER address.
-  const fromAddress = process.env.EMAIL_USER
-    ? `TaskBridge <${process.env.EMAIL_USER}>`
-    : (process.env.EMAIL_FROM || 'TaskBridge <noreply@taskbridge.io>');
-  try {
-    const info = await transporter.sendMail({
-      from: fromAddress,
-      to,
+const brevoConfigured = () => Boolean(process.env.BREVO_API_KEY);
+
+// The verified "from" address. With Brevo you verify a single sender (e.g. your
+// Gmail) in their dashboard — reuse EMAIL_USER for that, or set EMAIL_FROM_ADDR.
+const senderAddress = () =>
+  process.env.EMAIL_FROM_ADDR || process.env.EMAIL_USER || 'noreply@taskbridge.io';
+
+// Send via Brevo's HTTP API (port 443 — never blocked by Render's free tier).
+const sendViaBrevo = async ({ to, subject, html }) => {
+  const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': process.env.BREVO_API_KEY,
+      'Content-Type': 'application/json',
+      'accept': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: 'TaskBridge', email: senderAddress() },
+      to: [{ email: to }],
       subject,
-      html,
-      text,
-    });
-    if (emailConfigured()) console.log(`✅ Email sent to ${to} (id: ${info.messageId})`);
-    return { success: true, messageId: info.messageId };
+      htmlContent: html,
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    const err = new Error(`Brevo ${resp.status}: ${body}`);
+    err.code = `BREVO_${resp.status}`;
+    throw err;
+  }
+  const data = await resp.json().catch(() => ({}));
+  return { messageId: data.messageId || 'brevo-' + Date.now() };
+};
+
+const sendEmail = async ({ to, subject, html, text }) => {
+  try {
+    // 1) Preferred on Render free: Brevo HTTP API over HTTPS.
+    if (brevoConfigured()) {
+      const info = await sendViaBrevo({ to, subject, html });
+      console.log(`✅ Email sent to ${to} via Brevo (id: ${info.messageId})`);
+      return { success: true, messageId: info.messageId };
+    }
+
+    // 2) SMTP fallback (works where outbound SMTP is allowed, e.g. paid Render).
+    if (emailConfigured()) {
+      const transporter = createTransporter();
+      const fromAddress = `TaskBridge <${process.env.EMAIL_USER}>`;
+      const info = await transporter.sendMail({ from: fromAddress, to, subject, html, text });
+      console.log(`✅ Email sent to ${to} via SMTP (id: ${info.messageId})`);
+      return { success: true, messageId: info.messageId };
+    }
+
+    // 3) Nothing configured → mock (logs only).
+    console.log(`📧 [MOCK EMAIL — set BREVO_API_KEY to send for real] To: ${to} · ${subject}`);
+    return { success: true, messageId: 'mock-' + Date.now() };
   } catch (error) {
-    // Detailed logging so SMTP/credential problems are diagnosable in Render logs
     console.error('❌ Email send FAILED');
     console.error('  To:        ', to);
     console.error('  Subject:   ', subject);
     console.error('  Error code:', error.code || 'n/a');
-    console.error('  Command:   ', error.command || 'n/a');
     console.error('  Message:   ', error.message);
-    if (error.code === 'EAUTH') {
-      console.error('  → Auth rejected. Use a Gmail App Password (not your normal password) and confirm 2-Step Verification is on.');
+    if (String(error.code).startsWith('BREVO_401')) {
+      console.error('  → Brevo rejected the API key. Check BREVO_API_KEY in Render.');
     }
-    if (error.code === 'ETIMEDOUT' || error.code === 'ENETUNREACH' || error.code === 'ECONNECTION') {
-      console.error('  → Network/connection issue. Confirm port 587 outbound is allowed and family:4 is set.');
+    if (String(error.code).startsWith('BREVO_400')) {
+      console.error('  → Brevo rejected the request. Verify your sender email in Brevo (Senders & IPs).');
+    }
+    if (error.code === 'ETIMEDOUT' || error.code === 'ENETUNREACH') {
+      console.error('  → Outbound SMTP is blocked on this host. Use BREVO_API_KEY (HTTP) instead.');
     }
     return { success: false, error: error.message, code: error.code };
   }
