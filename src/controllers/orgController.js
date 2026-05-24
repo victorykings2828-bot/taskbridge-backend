@@ -296,6 +296,11 @@ const getMyOrganization = async (req, res) => {
     if (!user.organizationId) return res.status(404).json({ success: false, message: 'No organisation found' });
     const org = await Organization.findById(user.organizationId);
     if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
+    // Downgrade to Free if a paid plan has expired.
+    if (org.checkAndApplyExpiry()) {
+      await org.save();
+      await User.updateMany({ organizationId: org._id }, { subscriptionTier: 'free' });
+    }
     const [managerCount, employeeCount] = await Promise.all([
       User.countDocuments({ organizationId: org._id, role: 'manager', isActive: true }),
       User.countDocuments({ organizationId: org._id, role: 'employee', isActive: true }),

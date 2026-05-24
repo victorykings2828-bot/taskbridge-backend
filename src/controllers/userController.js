@@ -32,6 +32,11 @@ const createUser = async (req, res) => {
     if (!org) {
       return res.status(404).json({ success: false, message: 'Organisation not found' });
     }
+    // Enforce expiry first so limit checks use the correct (possibly Free) tier.
+    if (org.checkAndApplyExpiry()) {
+      await org.save();
+      await User.updateMany({ organizationId: org._id }, { subscriptionTier: 'free' });
+    }
 
     if (role === 'manager') {
       const managerCount = await User.countDocuments({ organizationId: org._id, role: 'manager', isActive: true });

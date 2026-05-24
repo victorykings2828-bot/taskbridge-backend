@@ -80,6 +80,22 @@ function _genCode() {
 }
 
 // ── Instance methods ───────────────────────────────────────────────────────
+// If a paid plan has passed its expiry date, drop the org back to Free.
+// Returns true if a change was made (so the caller can save).
+organizationSchema.methods.checkAndApplyExpiry = function () {
+  if (
+    this.subscriptionTier !== 'free' &&
+    this.subscriptionExpiresAt &&
+    this.subscriptionExpiresAt < new Date()
+  ) {
+    this.subscriptionTier   = 'free';
+    this.subscriptionStatus = 'expired';
+    this.applyTierLimits();
+    return true;
+  }
+  return false;
+};
+
 organizationSchema.methods.applyTierLimits = function () {
   const limits = {
     free:       { managers: 1,   employeesPerManager: 5,   totalEmployees: 5,    storageLimitBytes: STORAGE_LIMITS.free       },

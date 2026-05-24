@@ -5,10 +5,21 @@ const User         = require('../models/User');
 const AuditLog     = require('../models/AuditLog');
 const Notification = require('../models/Notification');
 
-const razorpay = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+// Lazily create the Razorpay client. If keys aren't configured, return null so
+// payment endpoints fail gracefully (503) instead of crashing the whole server
+// at startup.
+let _razorpay = null;
+const getRazorpay = () => {
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) return null;
+  if (!_razorpay) {
+    _razorpay = new Razorpay({
+      key_id:     process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  }
+  return _razorpay;
+};
+const PAYMENTS_DISABLED = { success: false, message: 'Payments are not configured yet. Please try again later.' };
 
 const fmtBytes = (b) => {
   if (!b) return '0 B';
@@ -31,6 +42,9 @@ const STORAGE_PRICE_PER_5GB = 125 * 100; // ₹125 per 5 GB
 // ─────────────────────────────────────────────────────────────────────────────
 const createPlanOrder = async (req, res) => {
   try {
+    const razorpay = getRazorpay();
+    if (!razorpay) return res.status(503).json(PAYMENTS_DISABLED);
+
     const { tier } = req.body;
     if (!PLAN_PRICES[tier])
       return res.status(400).json({ success: false, message: 'Invalid plan' });
@@ -80,6 +94,9 @@ const createPlanOrder = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const createStorageOrder = async (req, res) => {
   try {
+    const razorpay = getRazorpay();
+    if (!razorpay) return res.status(503).json(PAYMENTS_DISABLED);
+
     const extraGB = parseInt(req.body.extraGB, 10);
     if (!extraGB || extraGB < 5 || extraGB % 5 !== 0 || extraGB > 500)
       return res.status(400).json({ success: false, message: 'Must be a multiple of 5 GB (5–500 GB)' });
@@ -130,6 +147,9 @@ const createStorageOrder = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const verifyPayment = async (req, res) => {
   try {
+    const razorpay = getRazorpay();
+    if (!razorpay) return res.status(503).json(PAYMENTS_DISABLED);
+
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
@@ -289,6 +309,10 @@ const getBillingStatus = async (req, res) => {
     const org  = await Organization.findById(user.organizationId)
       .select('subscriptionTier subscriptionStatus subscriptionExpiresAt storage limits');
     if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
+    if (org.checkAndApplyExpiry()) {
+      await org.save();
+      await User.updateMany({ organizationId: org._id }, { subscriptionTier: 'free' });
+    }
 
     res.json({
       success: true,
