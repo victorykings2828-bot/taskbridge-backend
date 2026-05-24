@@ -99,7 +99,7 @@ organizationSchema.methods.checkAndApplyExpiry = function () {
 organizationSchema.methods.applyTierLimits = function () {
   const limits = {
     free:       { managers: 1,   employeesPerManager: 5,   totalEmployees: 5,    storageLimitBytes: STORAGE_LIMITS.free       },
-    pro:        { managers: 5,   employeesPerManager: 100, totalEmployees: 500,  storageLimitBytes: STORAGE_LIMITS.pro        },
+    pro:        { managers: 5,   employeesPerManager: 20,  totalEmployees: 100,  storageLimitBytes: STORAGE_LIMITS.pro        },
     enterprise: { managers: 9999,employeesPerManager: 9999,totalEmployees: 9999, storageLimitBytes: STORAGE_LIMITS.enterprise },
   };
   const base = limits[this.subscriptionTier] || limits.free;

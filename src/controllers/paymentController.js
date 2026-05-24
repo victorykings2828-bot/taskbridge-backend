@@ -27,10 +27,10 @@ const fmtBytes = (b) => {
   return `${(b/1024**3).toFixed(0)} GB`;
 };
 
-// Plan prices in paise (1 INR = 100 paise)
+// Plan prices in paise (1 INR = 100 paise).
+// Enterprise is a custom, sales-led plan (contact us) — not self-serve purchasable.
 const PLAN_PRICES = {
-  pro:        { amount: 1249 * 100, name: 'TaskBridge Pro',        tier: 'pro'        }, // ₹1249/month
-  enterprise: { amount: 6499 * 100, name: 'TaskBridge Enterprise', tier: 'enterprise' }, // ₹6499/month
+  pro: { amount: 1249 * 100, name: 'TaskBridge Pro', tier: 'pro' }, // ₹1249/month
 };
 
 // Extra storage price

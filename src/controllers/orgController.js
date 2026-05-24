@@ -94,11 +94,11 @@ const PLANS = [
     id: 'pro', name: 'Pro', price: 1249, priceLabel: '₹1,249/mo',
     description: 'Everything a growing team needs, at a price that makes sense',
     badge: 'Most Popular', highlighted: true,
-    limits: { managers: 5, employeesPerManager: 100, totalEmployees: 500, storageLimitBytes: 10*1024*1024*1024 },
+    limits: { managers: 5, employeesPerManager: 20, totalEmployees: 100, storageLimitBytes: 10*1024*1024*1024 },
     storageLabel: '10 GB',
     features: [
       { text: 'Up to 5 Manager accounts', included: true },
-      { text: 'Up to 100 employees per manager', included: true },
+      { text: 'Up to 20 employees per manager', included: true },
       { text: 'Everything in Starter', included: true },
       { text: 'Task priority (High / Medium / Low)', included: true },
       { text: 'File attachments & deliverables (10 GB)', included: true },
@@ -115,8 +115,8 @@ const PLANS = [
     cta: 'Start 14-day free trial', extraStorage: { perGB: 5, priceINR: 125 },
   },
   {
-    id: 'enterprise', name: 'Enterprise', price: 6499, priceLabel: '₹6,499/mo',
-    description: 'Unlimited scale, complete visibility, full accountability',
+    id: 'enterprise', name: 'Enterprise', price: null, priceLabel: 'Custom',
+    description: 'A custom plan built around your requirements',
     badge: null, highlighted: false,
     limits: { managers: 9999, employeesPerManager: 9999, totalEmployees: 9999, storageLimitBytes: 80*1024*1024*1024 },
     storageLabel: '80 GB',
@@ -136,7 +136,7 @@ const PLANS = [
       { text: 'Priority email & chat support', included: true },
       { text: 'Onboarding assistance', included: true },
     ],
-    cta: 'Get started', extraStorage: { perGB: 5, priceINR: 125 },
+    cta: 'Contact us', contactEmail: 'taskbridge111@gmail.com', extraStorage: { perGB: 5, priceINR: 125 },
   },
 ];
 
