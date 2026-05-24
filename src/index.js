@@ -1,3 +1,9 @@
+// Render's network has no outbound IPv6. Force Node to resolve hostnames to
+// IPv4 first so SMTP (Gmail) and other outbound connections don't fail with
+// "connect ENETUNREACH <ipv6>:587". Must run before any outbound connection.
+const dns = require('dns');
+if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
+
 require('dotenv').config();
 const express      = require('express');
 const helmet       = require('helmet');
