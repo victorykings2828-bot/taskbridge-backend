@@ -83,8 +83,9 @@ const createPlanOrder = async (req, res) => {
       prefill: { name: user.name, email: user.email },
     });
   } catch (err) {
-    console.error('createPlanOrder:', err.message);
-    res.status(500).json({ success: false, message: 'Failed to create payment order' });
+    // Razorpay SDK errors carry the real reason in err.error.description.
+    console.error('createPlanOrder FAILED:', err?.error?.description || err.message, '| statusCode:', err?.statusCode);
+    res.status(502).json({ success: false, message: err?.error?.description || 'Could not start payment. Check Razorpay configuration.' });
   }
 };
 
@@ -136,8 +137,8 @@ const createStorageOrder = async (req, res) => {
       prefill:     { name: user.name, email: user.email },
     });
   } catch (err) {
-    console.error('createStorageOrder:', err.message);
-    res.status(500).json({ success: false, message: 'Failed to create payment order' });
+    console.error('createStorageOrder FAILED:', err?.error?.description || err.message, '| statusCode:', err?.statusCode);
+    res.status(502).json({ success: false, message: err?.error?.description || 'Could not start payment. Check Razorpay configuration.' });
   }
 };
 
