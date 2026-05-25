@@ -78,7 +78,7 @@ const createPlanOrder = async (req, res) => {
     const order = await razorpay.orders.create({
       amount:   plan.amount,
       currency: 'INR',
-      receipt:  `plan_${org._id}_${Date.now()}`,
+      receipt:  `pl_${org._id.toString().slice(-8)}_${Date.now().toString().slice(-8)}`,
       notes: {
         organizationId: org._id.toString(),
         userId:         user._id.toString(),
@@ -134,7 +134,7 @@ const createStorageOrder = async (req, res) => {
     const order = await razorpay.orders.create({
       amount,
       currency: 'INR',
-      receipt:  `storage_${org._id}_${Date.now()}`,
+      receipt:  `stg_${org._id.toString().slice(-8)}_${Date.now().toString().slice(-8)}`,
       notes: {
         organizationId: org._id.toString(),
         userId:         user._id.toString(),
