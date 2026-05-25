@@ -76,9 +76,10 @@ const createPlanOrder = async (req, res) => {
     const plan = PLAN_PRICES[tier];
 
     const order = await razorpay.orders.create({
-      amount:   plan.amount,
-      currency: 'INR',
-      receipt:  `pl_${org._id.toString().slice(-8)}_${Date.now().toString().slice(-8)}`,
+      amount:          plan.amount,
+      currency:        'INR',
+      payment_capture: 1,
+      receipt:         `pl_${org._id.toString().slice(-8)}_${Date.now().toString().slice(-8)}`,
       notes: {
         organizationId: org._id.toString(),
         userId:         user._id.toString(),
@@ -133,8 +134,9 @@ const createStorageOrder = async (req, res) => {
 
     const order = await razorpay.orders.create({
       amount,
-      currency: 'INR',
-      receipt:  `stg_${org._id.toString().slice(-8)}_${Date.now().toString().slice(-8)}`,
+      currency:        'INR',
+      payment_capture: 1,
+      receipt:         `stg_${org._id.toString().slice(-8)}_${Date.now().toString().slice(-8)}`,
       notes: {
         organizationId: org._id.toString(),
         userId:         user._id.toString(),
@@ -196,7 +198,9 @@ const verifyPayment = async (req, res) => {
       return res.status(502).json({ success: false, message: 'Could not confirm payment with Razorpay. Please contact support.' });
     }
 
-    if (payment.status !== 'captured') {
+    // 'captured' = auto-captured (payment_capture:1), 'authorized' = manual capture mode.
+    // Both are valid — authorized means funds are reserved and guaranteed.
+    if (payment.status !== 'captured' && payment.status !== 'authorized') {
       console.warn(`verifyPayment: payment not captured | id=${razorpay_payment_id} status=${payment.status}`);
       return res.status(400).json({ success: false, message: `Payment is not confirmed (status: ${payment.status}). Please contact support.` });
     }
