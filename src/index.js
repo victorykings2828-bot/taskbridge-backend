@@ -24,6 +24,15 @@ if (missing.length) {
   process.exit(1);
 }
 
+// Warn when Razorpay is partially configured — partial config silently disables
+// webhook signature verification or breaks payment flows.
+if (process.env.RAZORPAY_KEY_ID && !process.env.RAZORPAY_WEBHOOK_SECRET) {
+  console.warn('⚠️  RAZORPAY_KEY_ID is set but RAZORPAY_WEBHOOK_SECRET is missing — all webhook requests will be rejected');
+}
+if (process.env.RAZORPAY_KEY_ID && !process.env.RAZORPAY_KEY_SECRET) {
+  console.warn('⚠️  RAZORPAY_KEY_ID is set but RAZORPAY_KEY_SECRET is missing — payment flows will fail');
+}
+
 const app    = express();
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -78,15 +87,23 @@ const strictLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, max: 20,
   message: { success: false, message: 'Too many requests' }, skip,
 });
+// Tight limit for payment order creation and verification — prevents brute-forcing
+// payment IDs or flooding Razorpay with fraudulent order requests.
+const paymentLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 10,
+  message: { success: false, message: 'Too many payment requests. Please try again later.' }, skip,
+});
 
 app.set('trust proxy', 1);
 app.use('/api/', limiter);
-app.use('/api/auth/login',           authLimiter);
-app.use('/api/auth/setup-account',   strictLimiter);
-app.use('/api/auth/forgot-password', authLimiter);
-app.use('/api/auth/reset-password',  strictLimiter);
-app.use('/api/auth/change-password', strictLimiter);
-app.use('/api/org/register',         registerLimiter);
+app.use('/api/auth/login',              authLimiter);
+app.use('/api/auth/setup-account',      strictLimiter);
+app.use('/api/auth/forgot-password',    authLimiter);
+app.use('/api/auth/reset-password',     strictLimiter);
+app.use('/api/auth/change-password',    strictLimiter);
+app.use('/api/org/register',            registerLimiter);
+app.use('/api/payments/create-order',   paymentLimiter);
+app.use('/api/payments/verify',         paymentLimiter);
 
 // ── Body parsing ───────────────────────────────────────────────────────────
 app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));

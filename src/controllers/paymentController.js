@@ -36,6 +36,19 @@ const PLAN_PRICES = {
 // Extra storage price
 const STORAGE_PRICE_PER_5GB = 125 * 100; // ₹125 per 5 GB
 
+// Timing-safe hex string comparison — prevents signature oracle attacks.
+// Returns false if lengths differ or content differs.
+const safeEqual = (a, b) => {
+  try {
+    const bufA = Buffer.from(a, 'hex');
+    const bufB = Buffer.from(b, 'hex');
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/payments/create-order/plan
 // Creates a Razorpay order for a plan upgrade
@@ -55,6 +68,10 @@ const createPlanOrder = async (req, res) => {
 
     const org = await Organization.findById(user.organizationId);
     if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
+
+    // Prevent double-upgrade to same tier
+    if (org.subscriptionTier === tier)
+      return res.status(400).json({ success: false, message: `Already on the ${tier} plan` });
 
     const plan = PLAN_PRICES[tier];
 
@@ -156,27 +173,60 @@ const verifyPayment = async (req, res) => {
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
       return res.status(400).json({ success: false, message: 'Missing payment details' });
 
-    // Verify signature — HMAC SHA256
+    // Step 1 — Verify HMAC SHA256 signature using timing-safe comparison.
+    // This proves Razorpay generated the response (not a forged frontend request).
     const expectedSignature = crypto
       .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
-    if (expectedSignature !== razorpay_signature)
+    if (!safeEqual(expectedSignature, razorpay_signature)) {
+      console.warn(`verifyPayment: invalid signature | ip=${req.ip} order=${razorpay_order_id}`);
       return res.status(400).json({ success: false, message: 'Payment verification failed. Please contact support.' });
+    }
 
-    // Fetch order details from Razorpay to get notes
+    // Step 2 — Confirm with Razorpay API that payment is actually captured.
+    // Signature verification alone doesn't prove funds were collected — an
+    // authorized-but-not-captured payment could still have a valid signature.
+    let payment;
+    try {
+      payment = await razorpay.payments.fetch(razorpay_payment_id);
+    } catch (fetchErr) {
+      console.error('verifyPayment: failed to fetch payment from Razorpay:', fetchErr?.error?.description || fetchErr.message);
+      return res.status(502).json({ success: false, message: 'Could not confirm payment with Razorpay. Please contact support.' });
+    }
+
+    if (payment.status !== 'captured') {
+      console.warn(`verifyPayment: payment not captured | id=${razorpay_payment_id} status=${payment.status}`);
+      return res.status(400).json({ success: false, message: `Payment is not confirmed (status: ${payment.status}). Please contact support.` });
+    }
+
+    // Ensure the payment belongs to the order we issued — prevents cross-order replay
+    if (payment.order_id !== razorpay_order_id) {
+      console.warn(`verifyPayment: payment/order mismatch | payment=${razorpay_payment_id} expected order=${razorpay_order_id} got=${payment.order_id}`);
+      return res.status(400).json({ success: false, message: 'Payment does not match the order. Please contact support.' });
+    }
+
+    // Step 3 — Fetch order notes and verify amount matches
     const order = await razorpay.orders.fetch(razorpay_order_id);
     const notes = order.notes || {};
+
+    // Payment amount must match the order amount — prevents paying less than required
+    if (payment.amount !== order.amount) {
+      console.warn(`verifyPayment: amount mismatch | paid=${payment.amount} expected=${order.amount} order=${razorpay_order_id}`);
+      return res.status(400).json({ success: false, message: 'Payment amount mismatch. Please contact support.' });
+    }
 
     if (!notes.organizationId)
       return res.status(400).json({ success: false, message: 'Invalid order' });
 
+    // Step 4 — Bind payment to the authenticated user's organisation
     const org = await Organization.findById(notes.organizationId);
     if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
     if (org._id.toString() !== req.user.organizationId?.toString() || notes.userId !== req.user._id.toString())
       return res.status(403).json({ success: false, message: 'Payment order does not belong to this account' });
 
+    // Step 5 — Idempotency: reject if this payment was already applied
     const alreadyApplied = await AuditLog.findOne({
       action: { $in: ['SUBSCRIPTION_UPGRADED', 'STORAGE_PURCHASED'] },
       'details.paymentId': razorpay_payment_id,
@@ -186,6 +236,10 @@ const verifyPayment = async (req, res) => {
 
     // ── Plan upgrade ──────────────────────────────────────────────────────
     if (notes.type === 'plan_upgrade' && notes.tier) {
+      // Validate tier is still a known, purchasable plan
+      if (!PLAN_PRICES[notes.tier])
+        return res.status(400).json({ success: false, message: 'Unknown plan tier in order' });
+
       org.subscriptionTier     = notes.tier;
       org.subscriptionStatus   = 'active';
       org.subscriptionExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000); // 30 days
@@ -197,21 +251,31 @@ const verifyPayment = async (req, res) => {
       await AuditLog.create({
         performedBy: notes.userId, action: 'SUBSCRIPTION_UPGRADED',
         targetModel: 'Organization', targetId: org._id,
-        details: { tier: notes.tier, via: 'razorpay', paymentId: razorpay_payment_id },
+        details: { tier: notes.tier, via: 'razorpay', paymentId: razorpay_payment_id, amountPaise: payment.amount },
       });
       await Notification.create({
         recipient: notes.userId, type: 'system',
-        title: `Plan upgraded to ${notes.tier}! 🎉`,
+        title: `Plan upgraded to ${notes.tier}!`,
         message: `Your workspace is now on the ${notes.tier} plan. Enjoy your new features!`,
       });
 
-      console.log(`✅ Plan upgraded: org=${notes.organizationId} tier=${notes.tier}`);
+      console.log(`✅ Plan upgraded: org=${notes.organizationId} tier=${notes.tier} payment=${razorpay_payment_id}`);
       return res.json({ success: true, message: `Successfully upgraded to ${notes.tier} plan!`, type: 'plan_upgrade', tier: notes.tier });
     }
 
     // ── Storage purchase ──────────────────────────────────────────────────
     if (notes.type === 'storage_purchase' && notes.extraGB) {
       const gb = parseInt(notes.extraGB, 10);
+      if (!gb || gb < 5 || gb % 5 !== 0 || gb > 500)
+        return res.status(400).json({ success: false, message: 'Invalid storage amount in order' });
+
+      // Verify the paid amount matches the expected price for this storage amount
+      const expectedAmount = STORAGE_PRICE_PER_5GB * (gb / 5);
+      if (payment.amount !== expectedAmount) {
+        console.warn(`verifyPayment: storage amount mismatch | paid=${payment.amount} expected=${expectedAmount}`);
+        return res.status(400).json({ success: false, message: 'Payment amount does not match storage price. Please contact support.' });
+      }
+
       org.storage.extraGBPurchased = (org.storage.extraGBPurchased || 0) + gb;
       org.applyTierLimits();
       await org.save();
@@ -219,15 +283,15 @@ const verifyPayment = async (req, res) => {
       await AuditLog.create({
         performedBy: notes.userId, action: 'STORAGE_PURCHASED',
         targetModel: 'Organization', targetId: org._id,
-        details: { extraGB: gb, via: 'razorpay', paymentId: razorpay_payment_id },
+        details: { extraGB: gb, via: 'razorpay', paymentId: razorpay_payment_id, amountPaise: payment.amount },
       });
       await Notification.create({
         recipient: notes.userId, type: 'system',
-        title: `${gb} GB storage added! 💾`,
+        title: `${gb} GB storage added!`,
         message: `Your storage limit is now ${fmtBytes(org.limits.storageLimitBytes)}.`,
       });
 
-      console.log(`✅ Storage added: org=${notes.organizationId} +${gb}GB`);
+      console.log(`✅ Storage added: org=${notes.organizationId} +${gb}GB payment=${razorpay_payment_id}`);
       return res.json({ success: true, message: `${gb} GB storage added successfully!`, type: 'storage_purchase', extraGB: gb });
     }
 
@@ -240,31 +304,101 @@ const verifyPayment = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/payments/webhook  (Razorpay webhook for recurring/refunds)
+// Razorpay calls this directly — no session auth, but MUST have valid HMAC.
+// RAZORPAY_WEBHOOK_SECRET is required; if unset all webhooks are rejected.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Only process events we actually handle; ignore everything else.
+const KNOWN_WEBHOOK_EVENTS = new Set([
+  'payment.captured',
+  'payment.failed',
+  'subscription.charged',
+  'subscription.cancelled',
+  'subscription.halted',
+]);
+
 const handleWebhook = async (req, res) => {
   try {
     const signature = req.headers['x-razorpay-signature'];
     const secret    = process.env.RAZORPAY_WEBHOOK_SECRET;
-    const rawBody   = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
 
-    if (secret) {
-      const expected = crypto
-        .createHmac('sha256', secret)
-        .update(rawBody)
-        .digest('hex');
-      if (expected !== signature)
-        return res.status(400).json({ error: 'Invalid webhook signature' });
+    // Webhook secret MUST be configured — no secret → reject all requests.
+    // An unconfigured secret would let any caller forge subscription events.
+    if (!secret) {
+      console.error('handleWebhook: RAZORPAY_WEBHOOK_SECRET not set — rejecting request');
+      return res.status(503).json({ error: 'Webhook not configured' });
     }
 
-    const body    = Buffer.isBuffer(req.body) ? JSON.parse(rawBody.toString('utf8')) : req.body;
+    if (!signature) {
+      console.warn(`handleWebhook: missing X-Razorpay-Signature | ip=${req.ip}`);
+      return res.status(400).json({ error: 'Missing webhook signature' });
+    }
+
+    const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
+
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(rawBody)
+      .digest('hex');
+
+    if (!safeEqual(expected, signature)) {
+      console.warn(`handleWebhook: invalid signature | ip=${req.ip}`);
+      return res.status(400).json({ error: 'Invalid webhook signature' });
+    }
+
+    const body    = JSON.parse(rawBody.toString('utf8'));
     const event   = body.event;
     const payload = body.payload;
 
-    console.log(`Razorpay webhook: ${event}`);
+    // Ignore unknown events — respond 200 so Razorpay stops retrying
+    if (!KNOWN_WEBHOOK_EVENTS.has(event)) {
+      console.log(`handleWebhook: ignoring unknown event '${event}'`);
+      return res.json({ received: true });
+    }
+
+    console.log(`handleWebhook: processing event '${event}'`);
 
     if (event === 'payment.captured') {
-      // Payment confirmed — already handled by /verify endpoint
-      // This is just a backup confirmation
+      // payment.captured is already handled by /verify; this is a safety net
+      // for cases where the user closed the browser before /verify was called.
+      const pay   = payload.payment?.entity;
+      const ordId = pay?.order_id;
+      if (ordId) {
+        // Fetch order notes to resolve the org
+        const razorpay = getRazorpay();
+        if (razorpay) {
+          try {
+            const order = await razorpay.orders.fetch(ordId);
+            const notes = order.notes || {};
+            if (notes.organizationId && notes.type === 'plan_upgrade' && notes.tier && PLAN_PRICES[notes.tier]) {
+              const already = await AuditLog.findOne({
+                action: 'SUBSCRIPTION_UPGRADED',
+                'details.paymentId': pay.id,
+              });
+              if (!already) {
+                const org = await Organization.findById(notes.organizationId);
+                if (org) {
+                  org.subscriptionTier      = notes.tier;
+                  org.subscriptionStatus    = 'active';
+                  org.subscriptionExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+                  org.razorpayPaymentId     = pay.id;
+                  org.applyTierLimits();
+                  await org.save();
+                  await User.updateMany({ organizationId: org._id }, { subscriptionTier: notes.tier });
+                  await AuditLog.create({
+                    performedBy: notes.userId, action: 'SUBSCRIPTION_UPGRADED',
+                    targetModel: 'Organization', targetId: org._id,
+                    details: { tier: notes.tier, via: 'razorpay_webhook', paymentId: pay.id, amountPaise: pay.amount },
+                  });
+                  console.log(`✅ Webhook fallback applied plan upgrade: org=${notes.organizationId} tier=${notes.tier}`);
+                }
+              }
+            }
+          } catch (e) {
+            console.error('handleWebhook payment.captured fallback error:', e.message);
+          }
+        }
+      }
     }
 
     if (event === 'subscription.charged') {
@@ -276,10 +410,11 @@ const handleWebhook = async (req, res) => {
           subscriptionStatus:    'active',
           subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000),
         });
+        console.log(`✅ Subscription renewed: org=${notes.organizationId}`);
       }
     }
 
-    if (event === 'subscription.cancelled') {
+    if (event === 'subscription.cancelled' || event === 'subscription.halted') {
       const sub   = payload.subscription?.entity;
       const notes = sub?.notes || {};
       if (notes.organizationId) {
@@ -290,13 +425,14 @@ const handleWebhook = async (req, res) => {
           org.applyTierLimits();
           await org.save();
           await User.updateMany({ organizationId: org._id }, { subscriptionTier: 'free' });
+          console.log(`⚠️  Subscription ${event}: org=${notes.organizationId} downgraded to free`);
         }
       }
     }
 
     res.json({ received: true });
   } catch (err) {
-    console.error('Razorpay webhook error:', err);
+    console.error('handleWebhook error:', err.message);
     res.status(500).json({ error: 'Webhook handler failed' });
   }
 };
